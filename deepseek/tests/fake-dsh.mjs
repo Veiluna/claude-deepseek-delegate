@@ -1,0 +1,46 @@
+#!/usr/bin/env node
+// Fake dsh for tests. Behaviour is driven by FAKE_DSH_MODE; every call is recorded to FAKE_DSH_RECORD.
+import fs from "node:fs";
+
+const chunks = [];
+process.stdin.on("data", (c) => chunks.push(c));
+process.stdin.on("end", () => {
+  const stdin = Buffer.concat(chunks).toString("utf8");
+  if (process.env.FAKE_DSH_RECORD) {
+    fs.writeFileSync(process.env.FAKE_DSH_RECORD, JSON.stringify({
+      argv: process.argv.slice(2),
+      cwd: process.cwd(),
+      permissionMode: process.env.DSH_PERMISSION_MODE ?? null,
+      stdin,
+    }));
+  }
+  const mode = process.env.FAKE_DSH_MODE || "success";
+  const emit = (ev) => process.stdout.write(JSON.stringify(ev) + "\n");
+  const finalText = process.env.FAKE_DSH_FINAL ?? "完成：已处理任务";
+  emit({ type: "session", sessionId: "thr_fake_1", cwd: process.cwd() });
+  emit({ type: "status", phase: "turn_start" });
+  switch (mode) {
+    case "success":
+      emit({ type: "status", phase: "turn_end", reason: { kind: "completed" } });
+      emit({ type: "final", text: finalText });
+      process.exit(0);
+    case "exit-nonzero":
+      emit({ type: "status", phase: "turn_end", reason: { kind: "completed" } });
+      emit({ type: "final", text: finalText });
+      process.stderr.write("boom\n");
+      process.exit(3);
+    case "error":
+      emit({ type: "error", message: "not logged in" });
+      process.exit(1);
+    case "no-final":
+      emit({ type: "status", phase: "turn_end", reason: { kind: "completed" } });
+      process.exit(0);
+    case "incomplete":
+      emit({ type: "status", phase: "turn_end", reason: { kind: "max_turns" } });
+      emit({ type: "final", text: "半途而止" });
+      process.exit(0);
+    case "non-json":
+      process.stdout.write("this is not json\n");
+      process.exit(0);
+  }
+});

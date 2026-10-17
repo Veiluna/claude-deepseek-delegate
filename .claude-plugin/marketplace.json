@@ -1,8 +1,9 @@
 {
   "name": "deepseek-delegate",
   "owner": { "name": "Veiluna" },
-  "metadata": { "description": "Claude Code 插件：把边界清晰的写代码任务自动分派给 DeepSeek 执行" },
+  "metadata": { "description": "在 Claude Code 里调用 DeepSeek 的插件" },
   "plugins": [
-    { "name": "deepseek-delegate", "source": "./deepseek-delegate", "description": "把边界清晰的写代码任务自动分派给 DeepSeek（deepseek-flash）执行" }
+    { "name": "deepseek", "source": "./deepseek", "description": "通过本机 DeepSeek Harness（dsh）在 Claude Code 里调用 DeepSeek" },
+    { "name": "deepseek-delegate", "source": "./deepseek-delegate", "description": "（旧版，将被 deepseek 取代）把边界清晰的写代码任务自动分派给 DeepSeek 执行" }
   ]
 }
