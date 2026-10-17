@@ -1,0 +1,8 @@
+{
+  "name": "deepseek-delegate",
+  "owner": { "name": "Veiluna" },
+  "metadata": { "description": "Claude Code 插件：把边界清晰的写代码任务自动分派给 DeepSeek 执行" },
+  "plugins": [
+    { "name": "deepseek-delegate", "source": "./deepseek-delegate", "description": "把边界清晰的写代码任务自动分派给 DeepSeek（deepseek-flash）执行" }
+  ]
+}
