@@ -79,7 +79,7 @@ export function parseEvents(stdout) {
     result.events.push(ev);
     const type = ev.type ?? ev.event;
     if (type === "session") {
-      result.threadId = ev.session_id ?? ev.sessionId ?? ev.id ?? ev.session?.id ?? result.threadId;
+      result.threadId = ev.sessionId ?? ev.session_id ?? ev.id ?? ev.session?.id ?? result.threadId;
     } else if (type === "status" && ev.phase === "turn_end") {
       result.reason = ev.reason?.kind ?? ev.reason ?? null;
     } else if (type === "final") {

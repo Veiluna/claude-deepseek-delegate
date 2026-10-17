@@ -44,7 +44,8 @@ export function setup() {
       const r = spawnSync(process.execPath, [COMPANION, ...args], {
         cwd,
         encoding: "utf8",
-        env: { ...process.env, DSH_BIN: bin, FAKE_DSH_RECORD: record, CLAUDE_PLUGIN_DATA: data, ...env },
+        // Stop git discovery at the temp dir, in case a parent (e.g. the home dir) is a repo.
+        env: { ...process.env, GIT_CEILING_DIRECTORIES: fs.realpathSync(os.tmpdir()), DSH_BIN: bin, FAKE_DSH_RECORD: record, CLAUDE_PLUGIN_DATA: data, ...env },
       });
       return { code: r.status, stdout: r.stdout, stderr: r.stderr };
     },

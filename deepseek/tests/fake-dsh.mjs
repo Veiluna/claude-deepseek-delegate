@@ -17,7 +17,7 @@ process.stdin.on("end", () => {
   const mode = process.env.FAKE_DSH_MODE || "success";
   const emit = (ev) => process.stdout.write(JSON.stringify(ev) + "\n");
   const finalText = process.env.FAKE_DSH_FINAL ?? "完成：已处理任务";
-  emit({ type: "session", session_id: "thr_fake_1" });
+  emit({ type: "session", sessionId: "thr_fake_1", cwd: process.cwd() });
   emit({ type: "status", phase: "turn_start" });
   switch (mode) {
     case "success":
