@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { setup, makeGitRepo } from "./helpers.mjs";
 
 test("setup reports Node version and where dsh was found", () => {
@@ -24,8 +26,8 @@ test("setup runs a minimal read-only task and reports it ready", () => {
   const r = t.run(["setup", "--json"], { cwd: makeGitRepo(), env: { FAKE_DSH_FINAL: "OK" } });
   const j = JSON.parse(r.stdout);
   assert.equal(t.readRecord().permissionMode, "read-only");
-  assert.equal(j.smoke.ok, true);
-  assert.equal(j.smoke.reply, "OK");
+  assert.equal(j.minimalTask.ok, true);
+  assert.equal(j.minimalTask.reply, "OK");
   assert.equal(j.ready, true);
   assert.deepEqual(j.suggestions, []);
 });
@@ -37,7 +39,7 @@ test("setup without dsh skips the task and suggests installing or DSH_BIN", () =
   assert.equal(r.code, 0, r.stderr);
   const j = JSON.parse(r.stdout);
   assert.equal(j.dsh.found, false);
-  assert.equal(j.smoke, null);
+  assert.equal(j.minimalTask, null);
   assert.equal(j.ready, false);
   assert.match(j.dsh.error, /DSH_BIN 指向的文件不存在/);
   assert.match(j.suggestions.join("\n"), /DSH_BIN/);
@@ -47,8 +49,8 @@ test("setup suggests logging in to the Harness when the task fails on auth", () 
   const t = setup();
   const r = t.run(["setup", "--json"], { cwd: makeGitRepo(), env: { FAKE_DSH_MODE: "error" } });
   const j = JSON.parse(r.stdout);
-  assert.equal(j.smoke.ok, false);
-  assert.equal(j.smoke.error, "not logged in");
+  assert.equal(j.minimalTask.ok, false);
+  assert.equal(j.minimalTask.error, "not logged in");
   assert.equal(j.ready, false);
   assert.match(j.suggestions.join("\n"), /登录/);
 });
@@ -57,8 +59,8 @@ test("setup reports other task failures with the raw output and a suggestion", (
   const t = setup();
   const r = t.run(["setup", "--json"], { cwd: makeGitRepo(), env: { FAKE_DSH_MODE: "non-json" } });
   const j = JSON.parse(r.stdout);
-  assert.equal(j.smoke.ok, false);
-  assert.match(j.smoke.output, /this is not json/);
+  assert.equal(j.minimalTask.ok, false);
+  assert.match(j.minimalTask.output, /this is not json/);
   assert.equal(j.ready, false);
   assert.equal(j.suggestions.length, 1);
   assert.doesNotMatch(j.suggestions[0], /登录/);
@@ -89,4 +91,59 @@ test("readable report lists the problem and suggestion when not ready", () => {
   assert.match(r.stdout, /最小任务：失败.*not logged in/);
   assert.match(r.stdout, /建议/);
   assert.match(r.stdout, /登录/);
+});
+
+test("setup finds dsh on PATH when DSH_BIN is not set", () => {
+  const t = setup();
+  const binDir = path.dirname(t.bin);
+  const r = t.run(["setup", "--json"], {
+    cwd: makeGitRepo(),
+    env: { DSH_BIN: "", PATH: `${binDir}${path.delimiter}${process.env.PATH}` },
+  });
+  const j = JSON.parse(r.stdout);
+  assert.equal(j.dsh.found, true);
+  assert.equal(path.dirname(j.dsh.path), binDir);
+});
+
+test("setup gives a different suggestion when dsh is nowhere to be found", () => {
+  const t = setup();
+  const empty = makeGitRepo();
+  const r = t.run(["setup", "--json"], { cwd: empty, env: { DSH_BIN: "", PATH: empty, HOME: empty, USERPROFILE: empty } });
+  const j = JSON.parse(r.stdout);
+  assert.equal(j.dsh.found, false);
+  assert.match(j.suggestions.join("\n"), /安装 DeepSeek Harness/);
+  assert.doesNotMatch(j.suggestions.join("\n"), /DSH_BIN 指向/);
+});
+
+test("setup suggests fixing DSH_BIN when it points at a missing file", () => {
+  const t = setup();
+  const repo = makeGitRepo();
+  const r = t.run(["setup", "--json"], { cwd: repo, env: { DSH_BIN: repo + "/missing/dsh" } });
+  assert.match(JSON.parse(r.stdout).suggestions.join("\n"), /检查 DSH_BIN/);
+});
+
+test("setup gives up on a minimal task that hangs", () => {
+  const t = setup();
+  const started = Date.now();
+  const r = t.run(["setup", "--json"], {
+    cwd: makeGitRepo(),
+    env: { FAKE_DSH_MODE: "hang", DEEPSEEK_SETUP_TIMEOUT_MS: "500" },
+  });
+  assert.ok(Date.now() - started < 10000);
+  const j = JSON.parse(r.stdout);
+  assert.equal(j.minimalTask.ok, false);
+  assert.match(j.minimalTask.error, /超时/);
+  assert.equal(j.ready, false);
+});
+
+test("setup reports a dsh that cannot be started", { skip: process.platform === "win32" }, () => {
+  const t = setup();
+  const repo = makeGitRepo();
+  const notExecutable = path.join(repo, "dsh");
+  fs.writeFileSync(notExecutable, "not a program");
+  const r = t.run(["setup", "--json"], { cwd: repo, env: { DSH_BIN: notExecutable } });
+  assert.equal(r.code, 0, r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.equal(j.minimalTask.ok, false);
+  assert.match(j.minimalTask.error, /启动 dsh 失败/);
 });

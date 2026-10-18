@@ -4,6 +4,7 @@ import fs from "node:fs";
 
 if (process.argv.includes("--version")) {
   if (process.env.FAKE_DSH_MODE === "version-fails") process.exit(2);
+  if (process.env.FAKE_DSH_MODE === "hang") process.exit(0);
   process.stdout.write((process.env.FAKE_DSH_VERSION ?? "dsh 0.0.0-fake") + "\n");
   process.exit(0);
 }
@@ -45,6 +46,9 @@ process.stdin.on("end", () => {
       emit({ type: "status", phase: "turn_end", reason: { kind: "max_turns" } });
       emit({ type: "final", text: "半途而止" });
       process.exit(0);
+    case "hang":
+      setInterval(() => {}, 1000);
+      break;
     case "non-json":
       process.stdout.write("this is not json\n");
       process.exit(0);
