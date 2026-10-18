@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import process from "node:process";
 import { parseArgs, splitRawArgs } from "./lib/args.mjs";
-import { resolveWorkspaceRoot } from "./lib/state.mjs";
+import { resolveWorkspaceRoot, loadState, updateState } from "./lib/state.mjs";
 import { runDsh, findDsh, dshVersion, DshNotFoundError } from "./lib/dsh.mjs";
 
 function out(text) {
@@ -25,18 +25,39 @@ function describeFailure(r) {
 }
 
 async function cmdTask(argv) {
-  const { flags, text } = parseArgs(argv, ["cwd"]);
-  if (!text) fail("用法：task [--read-only] [--cwd <目录>] [--json] <任务描述>", 2);
+  const { flags, text } = parseArgs(argv, ["cwd", "expected-thread-id"]);
+  if (flags.resume && flags.fresh) fail("--resume 与 --fresh 不能同时指定。", 2);
+  const expectedThreadId = flags["expected-thread-id"];
+  if ("expected-thread-id" in flags && (!flags.resume || typeof expectedThreadId !== "string" || !expectedThreadId.trim() || expectedThreadId.startsWith("--"))) {
+    fail("--expected-thread-id <线程ID> 必须与 --resume 配合，并提供非空线程 ID。", 2);
+  }
+  if (!text) fail("用法：task [--resume [--expected-thread-id <线程ID>] | --fresh] [--read-only] [--cwd <目录>] [--json] <任务描述>", 2);
   const workspaceRoot = resolveWorkspaceRoot(flags.cwd || process.cwd());
   const permissionMode = flags["read-only"] ? "read-only" : "workspace-write";
+  const threadId = flags.resume ? loadState(workspaceRoot).resumableThread?.threadId : undefined;
+  if (flags.resume && !threadId) fail("当前项目没有可续接线程。请用 --fresh 新开 DeepSeek 线程。");
+  if (expectedThreadId !== undefined && threadId !== expectedThreadId) {
+    fail("可续接线程已变化，未启动 DeepSeek。请重新运行 /deepseek:task 查看摘要并选择。");
+  }
   let r;
   try {
-    r = await runDsh({ prompt: text, cwd: workspaceRoot, permissionMode });
+    r = await runDsh({ prompt: text, cwd: workspaceRoot, permissionMode, threadId });
   } catch (err) {
     if (err instanceof DshNotFoundError) {
       fail(`${err.message}\n请安装 DeepSeek Harness 或设置 DSH_BIN，然后运行 /deepseek:setup 检查环境。`);
     }
     fail(`启动 dsh 失败：${err.message}\n请运行 /deepseek:setup 检查环境。`);
+  }
+  let saveWarning;
+  if (r.ok && typeof r.threadId === "string" && r.threadId.trim()) {
+    try {
+      await updateState(workspaceRoot, (state) => {
+        state.resumableThread = { threadId: r.threadId, summary: r.final.trim().slice(0, 500) };
+      });
+    } catch (err) {
+      saveWarning = `可续接线程未能保存（线程 ID：${r.threadId}）：${err.message}`;
+      process.stderr.write(`警告：${saveWarning}\n`);
+    }
   }
   if (flags.json) {
     out(JSON.stringify({
@@ -46,12 +67,28 @@ async function cmdTask(argv) {
       reason: r.reason,
       exitCode: r.exitCode,
       error: r.error,
+      ...(saveWarning ? { resumableThreadSaved: false, warnings: [saveWarning] } : {}),
       ...(r.ok ? {} : { stdout: r.stdout, stderr: r.stderr }),
     }, null, 2));
-    process.exit(r.ok ? 0 : 1);
+    process.exitCode = r.ok ? 0 : 1;
+    return;
   }
   if (!r.ok) fail(describeFailure(r));
   out(r.final);
+}
+
+function cmdTaskResumeCandidate(argv) {
+  const { flags } = parseArgs(argv, ["cwd"]);
+  const workspaceRoot = resolveWorkspaceRoot(flags.cwd || process.cwd());
+  const candidate = loadState(workspaceRoot).resumableThread;
+  const result = {
+    available: Boolean(candidate?.threadId),
+    threadId: candidate?.threadId ?? null,
+    summary: candidate?.summary ?? null,
+  };
+  out(flags.json ? JSON.stringify(result, null, 2) : result.available
+    ? `可续接线程：${result.threadId}\n上次任务摘要：${result.summary}`
+    : "当前项目没有可续接线程。");
 }
 
 const MIN_NODE_MAJOR = 18;
@@ -133,7 +170,7 @@ function renderSetup(report) {
   return lines.join("\n");
 }
 
-const COMMANDS = { task: cmdTask, setup: cmdSetup };
+const COMMANDS = { task: cmdTask, "task-resume-candidate": cmdTaskResumeCandidate, setup: cmdSetup };
 
 async function main() {
   const [sub, ...rest] = process.argv.slice(2);
@@ -142,4 +179,7 @@ async function main() {
   await handler(splitRawArgs(rest));
 }
 
-main();
+main().catch((err) => {
+  process.stderr.write(`DeepSeek 命令失败：${err.message}\n`);
+  process.exitCode = 1;
+});

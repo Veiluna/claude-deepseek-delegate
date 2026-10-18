@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -37,18 +37,35 @@ export function setup() {
   const bin = makeFakeDshBin(work);
   const record = path.join(work, "record.json");
   const data = path.join(work, "data");
+  // Stop git discovery at the temp dir, in case a parent (e.g. the home dir) is a repo.
+  const environment = (env) => ({ ...process.env, GIT_CEILING_DIRECTORIES: fs.realpathSync(os.tmpdir()), DSH_BIN: bin, FAKE_DSH_RECORD: record, CLAUDE_PLUGIN_DATA: data, ...env });
   return {
     bin,
     record,
+    data,
     readRecord: () => JSON.parse(fs.readFileSync(record, "utf8")),
-    run(args, { cwd, env = {} } = {}) {
-      const r = spawnSync(process.execPath, [COMPANION, ...args], {
+    run(args, { cwd, env = {}, nodeArgs = [] } = {}) {
+      const r = spawnSync(process.execPath, [...nodeArgs, COMPANION, ...args], {
         cwd,
         encoding: "utf8",
-        // Stop git discovery at the temp dir, in case a parent (e.g. the home dir) is a repo.
-        env: { ...process.env, GIT_CEILING_DIRECTORIES: fs.realpathSync(os.tmpdir()), DSH_BIN: bin, FAKE_DSH_RECORD: record, CLAUDE_PLUGIN_DATA: data, ...env },
+        env: environment(env),
       });
       return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+    },
+    runAsync(args, { cwd, env = {} } = {}) {
+      return new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [COMPANION, ...args], {
+          cwd, env: environment(env), stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk) => (stdout += chunk));
+        child.stderr.on("data", (chunk) => (stderr += chunk));
+        child.on("error", reject);
+        child.on("close", (code) => resolve({ code, stdout, stderr }));
+      });
     },
   };
 }
