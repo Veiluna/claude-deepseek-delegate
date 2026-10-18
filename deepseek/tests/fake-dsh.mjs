@@ -1,6 +1,34 @@
 #!/usr/bin/env node
 // Fake dsh for tests. Behaviour is driven by FAKE_DSH_MODE; every call is recorded to FAKE_DSH_RECORD.
 import fs from "node:fs";
+import path from "node:path";
+import { realisticDump } from "./config-dump-fixture.mjs";
+
+function recordCall(stdin = "") {
+  const argv = process.argv.slice(2);
+  const patchIndex = argv.indexOf("--patch");
+  const patchPath = patchIndex < 0 ? null : argv[patchIndex + 1];
+  const record = {
+    argv, cwd: process.cwd(),
+    permissionMode: process.env.DSH_PERMISSION_MODE ?? null,
+    stdin,
+    patchPath,
+    patch: patchPath ? fs.readFileSync(patchPath, "utf8") : null,
+    patchMode: patchPath ? fs.statSync(patchPath).mode & 0o777 : null,
+    directoryMode: patchPath ? fs.statSync(path.dirname(patchPath)).mode & 0o777 : null,
+  };
+  if (process.env.FAKE_DSH_RECORD) {
+    fs.writeFileSync(process.env.FAKE_DSH_RECORD, JSON.stringify(record));
+    fs.appendFileSync(process.env.FAKE_DSH_RECORD + ".calls.jsonl", JSON.stringify(record) + "\n");
+  }
+}
+
+if (process.argv.includes("--dump-config")) {
+  recordCall();
+  process.stdout.write(process.env.FAKE_DSH_CONFIG ?? realisticDump);
+  process.stderr.write(process.env.FAKE_DSH_DUMP_STDERR ?? "");
+  process.exitCode = Number(process.env.FAKE_DSH_DUMP_EXIT ?? 0);
+} else {
 
 if (process.argv.includes("--version")) {
   if (process.env.FAKE_DSH_MODE === "version-fails") process.exit(2);
@@ -9,18 +37,20 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 
+// launcher 遇到首个应用参数后，将剩余参数全部交给 headless。
+const argv = process.argv.slice(2);
+let applicationStart = 0;
+while (["--profile", "--patch"].includes(argv[applicationStart])) applicationStart += 2;
+if (argv.slice(applicationStart).includes("--patch")) {
+  process.stderr.write("error: unknown option '--patch'\n");
+  process.exit(1);
+}
+
 const chunks = [];
 process.stdin.on("data", (c) => chunks.push(c));
 process.stdin.on("end", () => {
   const stdin = Buffer.concat(chunks).toString("utf8");
-  if (process.env.FAKE_DSH_RECORD) {
-    fs.writeFileSync(process.env.FAKE_DSH_RECORD, JSON.stringify({
-      argv: process.argv.slice(2),
-      cwd: process.cwd(),
-      permissionMode: process.env.DSH_PERMISSION_MODE ?? null,
-      stdin,
-    }));
-  }
+  recordCall(stdin);
   const mode = process.env.FAKE_DSH_MODE || "success";
   const emit = (ev) => process.stdout.write(JSON.stringify(ev) + "\n");
   const finalText = process.env.FAKE_DSH_FINAL ?? "完成：已处理任务";
@@ -37,6 +67,13 @@ process.stdin.on("end", () => {
       process.exitCode = 0;
       return;
     case "exit-nonzero":
+      if (process.env.FAKE_DSH_ECHO_PATCH) {
+        const index = process.argv.indexOf("--patch");
+        const content = fs.readFileSync(process.argv[index + 1], "utf8");
+        process.stderr.write(content);
+        emit({ type: "error", message: content });
+        emit({ type: "text", text: content });
+      }
       emit({ type: "status", phase: "turn_end", reason: { kind: "completed" } });
       emit({ type: "final", text: finalText });
       process.stderr.write("boom\n");
@@ -68,3 +105,4 @@ process.stdin.on("end", () => {
       return;
   }
 });
+}

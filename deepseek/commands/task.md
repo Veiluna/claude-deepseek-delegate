@@ -1,11 +1,15 @@
 ---
 description: 把一项任务交给 DeepSeek 执行
-argument-hint: "[--resume | --fresh] [--read-only] [--cwd <目录>] <任务描述>"
+argument-hint: "[--resume | --fresh] [--model <模型名>] [--effort <off|low|high|max>] [--read-only] [--cwd <目录>] <任务描述>"
 ---
 
 把下面的任务交给 DeepSeek 执行：
 
 $ARGUMENTS
+
+`--model <模型名>` 和 `--effort <off|low|high|max>` 只覆盖本次任务，可以与 `--resume` 或 `--fresh` 配合；只有用户明确指定时才传给子代理。未指定时沿用 Harness 当前设置。指定覆盖时，companion 先读取当前配置并合并字段，临时覆盖文件用完即删；配置读取或解析失败时停止，不使用固定默认值。参数放在任务描述前；`--` 后的文字始终是任务正文。
+
+`--effort` 覆盖 `llm-deepseek.reasoningEffort`；若 `agent-default-model` 当前 config 已有 `reasoningEffort` 键，也同步覆盖，未有该键则不新增。仅指定 `--effort` 时允许没有 `agent-default-model` 条目。临时目录删除失败时会向 stderr 输出含目录路径的警告，任务结果与线程保存仍按任务本身的结果处理。
 
 先在当前 Claude 会话里完成线程选择，再调用子代理：
 
