@@ -38,6 +38,7 @@ export function setup() {
   const record = path.join(work, "record.json");
   const data = path.join(work, "data");
   return {
+    bin,
     record,
     readRecord: () => JSON.parse(fs.readFileSync(record, "utf8")),
     run(args, { cwd, env = {} } = {}) {

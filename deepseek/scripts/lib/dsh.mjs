@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 // Appended to every message sent to DeepSeek (ADR-0004: headless has no approver).
 export const PREAMBLE = [
@@ -53,15 +53,30 @@ export function findDsh(env = process.env) {
   throw new DshNotFoundError("找不到 dsh（已检查 DSH_BIN、PATH 和默认安装路径）。");
 }
 
-function spawnDsh(bin, args, options) {
+// Windows .cmd/.bat shims must go through the command interpreter.
+function dshCommand(bin, args) {
   if (process.platform === "win32" && /\.(cmd|bat)$/i.test(bin)) {
     const line = [bin, ...args].map((a) => `"${a}"`).join(" ");
-    return spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${line}"`], {
-      ...options,
-      windowsVerbatimArguments: true,
-    });
+    return {
+      command: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", `"${line}"`],
+      extra: { windowsVerbatimArguments: true },
+    };
   }
-  return spawn(bin, args, options);
+  return { command: bin, args, extra: {} };
+}
+
+function spawnDsh(bin, args, options) {
+  const c = dshCommand(bin, args);
+  return spawn(c.command, c.args, { ...options, ...c.extra });
+}
+
+// `dsh --version` output, or null when it cannot be read.
+export function dshVersion(bin) {
+  const c = dshCommand(bin, ["--version"]);
+  const r = spawnSync(c.command, c.args, { ...c.extra, encoding: "utf8", timeout: 15000, windowsHide: true });
+  const text = (r.stdout || "").trim();
+  return r.status === 0 && text ? text.split(/\r?\n/)[0] : null;
 }
 
 // Parse the headless --json event stream. Only `final` is untruncated.

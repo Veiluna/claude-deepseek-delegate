@@ -2,6 +2,12 @@
 // Fake dsh for tests. Behaviour is driven by FAKE_DSH_MODE; every call is recorded to FAKE_DSH_RECORD.
 import fs from "node:fs";
 
+if (process.argv.includes("--version")) {
+  if (process.env.FAKE_DSH_MODE === "version-fails") process.exit(2);
+  process.stdout.write((process.env.FAKE_DSH_VERSION ?? "dsh 0.0.0-fake") + "\n");
+  process.exit(0);
+}
+
 const chunks = [];
 process.stdin.on("data", (c) => chunks.push(c));
 process.stdin.on("end", () => {
