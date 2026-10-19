@@ -25,13 +25,19 @@ function describeFailure(r) {
 }
 
 async function cmdTask(argv) {
-  const { flags, text } = parseArgs(argv, ["cwd", "expected-thread-id"]);
+  const { flags, text } = parseArgs(argv, ["cwd", "expected-thread-id", "model", "effort"]);
+  if ("model" in flags && (typeof flags.model !== "string" || !flags.model.trim() || flags.model.startsWith("--"))) {
+    fail("--model <模型名> 必须提供非空模型名。", 2);
+  }
+  if ("effort" in flags && !["off", "low", "high", "max"].includes(flags.effort)) {
+    fail("--effort 只允许 off、low、high、max。", 2);
+  }
   if (flags.resume && flags.fresh) fail("--resume 与 --fresh 不能同时指定。", 2);
   const expectedThreadId = flags["expected-thread-id"];
   if ("expected-thread-id" in flags && (!flags.resume || typeof expectedThreadId !== "string" || !expectedThreadId.trim() || expectedThreadId.startsWith("--"))) {
     fail("--expected-thread-id <线程ID> 必须与 --resume 配合，并提供非空线程 ID。", 2);
   }
-  if (!text) fail("用法：task [--resume [--expected-thread-id <线程ID>] | --fresh] [--read-only] [--cwd <目录>] [--json] <任务描述>", 2);
+  if (!text) fail("用法：task [--resume [--expected-thread-id <线程ID>] | --fresh] [--model <模型名>] [--effort <off|low|high|max>] [--read-only] [--cwd <目录>] [--json] <任务描述>", 2);
   const workspaceRoot = resolveWorkspaceRoot(flags.cwd || process.cwd());
   const permissionMode = flags["read-only"] ? "read-only" : "workspace-write";
   const threadId = flags.resume ? loadState(workspaceRoot).resumableThread?.threadId : undefined;
@@ -41,7 +47,7 @@ async function cmdTask(argv) {
   }
   let r;
   try {
-    r = await runDsh({ prompt: text, cwd: workspaceRoot, permissionMode, threadId });
+    r = await runDsh({ prompt: text, cwd: workspaceRoot, permissionMode, threadId, model: flags.model, effort: flags.effort });
   } catch (err) {
     if (err instanceof DshNotFoundError) {
       fail(`${err.message}\n请安装 DeepSeek Harness 或设置 DSH_BIN，然后运行 /deepseek:setup 检查环境。`);

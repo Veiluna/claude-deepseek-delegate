@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { buildPatches, withPatch } from "./config-patch.mjs";
 
 // Appended to every message sent to DeepSeek (ADR-0004: headless has no approver).
 export const PREAMBLE = [
@@ -136,12 +137,42 @@ function killTree(child) {
 }
 
 // Run one headless turn. Resolves with { ok, exitCode, threadId, final, reason, error, timedOut, stdout, stderr }.
-export function runDsh({ prompt, cwd, permissionMode, threadId, onEvent, timeoutMs }) {
+export async function runDsh({ prompt, cwd, permissionMode, threadId, onEvent, timeoutMs, model, effort }) {
   const bin = findDsh();
-  const args = ["--profile", "headless", "--json"];
+  const env = { ...process.env, DSH_PERMISSION_MODE: permissionMode };
+  if (model !== undefined || effort !== undefined) {
+    const c = dshCommand(bin, ["--profile", "headless", "--dump-config"]);
+    let dump;
+    try {
+      dump = spawnSync(c.command, c.args, {
+        ...c.extra, cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15000, windowsHide: true,
+      });
+    } catch {
+      throw new Error("读取 dsh 配置失败（--dump-config），未启动任务。");
+    }
+    if (dump.error || dump.status !== 0) throw new Error("读取 dsh 配置失败（--dump-config），未启动任务。");
+    const patches = buildPatches(dump.stdout, { model, effort });
+    return withPatch(patches, async (patch) => {
+      const result = await runTurn({ bin, env, prompt, cwd, threadId, timeoutMs, patch });
+      // dsh may echo config validation errors, including secrets from the patch.
+      // Keep ordinary task output unchanged; overridden failures expose no raw stream.
+      if (!result.ok) return {
+        ...result, final: null, reason: null, events: [], stdout: "", stderr: "",
+        error: "使用临时配置的 dsh 任务失败，原始输出已隐藏。",
+      };
+      return result;
+    });
+  }
+  return runTurn({ bin, env, prompt, cwd, threadId, onEvent, timeoutMs });
+}
+
+function runTurn({ bin, env, prompt, cwd, threadId, onEvent, timeoutMs, patch }) {
+  const args = ["--profile", "headless"];
+  if (patch) args.push("--patch", patch);
+  args.push("--json");
   if (threadId) args.push("--session-id", threadId);
   args.push("-");
-  const env = { ...process.env, DSH_PERMISSION_MODE: permissionMode };
   return new Promise((resolve, reject) => {
     const child = spawnDsh(bin, args, {
       cwd,
