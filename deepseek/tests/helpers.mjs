@@ -32,13 +32,13 @@ export function makeGitRepo() {
   return repo;
 }
 
-export function setup() {
+export function setup(defaultEnv = {}) {
   const work = tmpDir("ds-test-");
   const bin = makeFakeDshBin(work);
   const record = path.join(work, "record.json");
   const data = path.join(work, "data");
   // Stop git discovery at the temp dir, in case a parent (e.g. the home dir) is a repo.
-  const environment = (env) => ({ ...process.env, GIT_CEILING_DIRECTORIES: fs.realpathSync(os.tmpdir()), DSH_BIN: bin, FAKE_DSH_RECORD: record, CLAUDE_PLUGIN_DATA: data, ...env });
+  const environment = (env) => ({ ...process.env, GIT_CEILING_DIRECTORIES: fs.realpathSync(os.tmpdir()), DSH_BIN: bin, FAKE_DSH_RECORD: record, CLAUDE_PLUGIN_DATA: data, ...defaultEnv, ...env });
   return {
     bin,
     record,

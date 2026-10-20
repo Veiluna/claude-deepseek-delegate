@@ -69,7 +69,10 @@ export function loadState(workspaceRoot) {
 }
 
 export async function saveState(workspaceRoot, state) {
-  const target = stateFile(workspaceRoot);
+  return writeJsonAtomic(stateFile(workspaceRoot), state);
+}
+
+export async function writeJsonAtomic(target, state) {
   // Publish a complete snapshot without truncating the file held by other readers.
   const temporary = `${target}.${crypto.randomUUID()}.tmp`;
   const fd = fs.openSync(temporary, "wx");

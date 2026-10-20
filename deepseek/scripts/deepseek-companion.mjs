@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 import process from "node:process";
 import { parseArgs, splitRawArgs } from "./lib/args.mjs";
-import { resolveWorkspaceRoot, loadState, updateState } from "./lib/state.mjs";
+import { resolveWorkspaceRoot, loadState } from "./lib/state.mjs";
 import { runDsh, findDsh, dshVersion, DshNotFoundError } from "./lib/dsh.mjs";
+import { executeTask } from "./lib/task.mjs";
+import { startJob, jobStatus, jobStatuses, jobResult, cancelJob } from "./lib/jobs.mjs";
+import { collectReviewContext } from "./lib/review-git.mjs";
+import { executeReview, reviewPrompt, renderReview } from "./lib/review.mjs";
+import { resolveTranscript, transferSession } from "./lib/transfer.mjs";
 
 function out(text) {
   process.stdout.write(text.endsWith("\n") ? text : text + "\n");
@@ -24,20 +29,24 @@ function describeFailure(r) {
   return lines.join("\n");
 }
 
-async function cmdTask(argv) {
-  const { flags, text } = parseArgs(argv, ["cwd", "expected-thread-id", "model", "effort"]);
+function validateOverrides(flags) {
   if ("model" in flags && (typeof flags.model !== "string" || !flags.model.trim() || flags.model.startsWith("--"))) {
     fail("--model <模型名> 必须提供非空模型名。", 2);
   }
   if ("effort" in flags && !["off", "low", "high", "max"].includes(flags.effort)) {
     fail("--effort 只允许 off、low、high、max。", 2);
   }
+}
+
+async function cmdTask(argv) {
+  const { flags, text } = parseArgs(argv, ["cwd", "expected-thread-id", "model", "effort"]);
+  validateOverrides(flags);
   if (flags.resume && flags.fresh) fail("--resume 与 --fresh 不能同时指定。", 2);
   const expectedThreadId = flags["expected-thread-id"];
   if ("expected-thread-id" in flags && (!flags.resume || typeof expectedThreadId !== "string" || !expectedThreadId.trim() || expectedThreadId.startsWith("--"))) {
     fail("--expected-thread-id <线程ID> 必须与 --resume 配合，并提供非空线程 ID。", 2);
   }
-  if (!text) fail("用法：task [--resume [--expected-thread-id <线程ID>] | --fresh] [--model <模型名>] [--effort <off|low|high|max>] [--read-only] [--cwd <目录>] [--json] <任务描述>", 2);
+  if (!text) fail("用法：task [--background] [--resume [--expected-thread-id <线程ID>] | --fresh] [--model <模型名>] [--effort <off|low|high|max>] [--read-only] [--cwd <目录>] [--json] <任务描述>", 2);
   const workspaceRoot = resolveWorkspaceRoot(flags.cwd || process.cwd());
   const permissionMode = flags["read-only"] ? "read-only" : "workspace-write";
   const threadId = flags.resume ? loadState(workspaceRoot).resumableThread?.threadId : undefined;
@@ -47,23 +56,18 @@ async function cmdTask(argv) {
   }
   let r;
   try {
-    r = await runDsh({ prompt: text, cwd: workspaceRoot, permissionMode, threadId, model: flags.model, effort: flags.effort });
+    const options = { prompt: text, cwd: workspaceRoot, permissionMode, threadId, model: flags.model, effort: flags.effort };
+    if (flags.background) {
+      const job = await startJob(workspaceRoot, options);
+      out(flags.json ? JSON.stringify(job, null, 2) : `作业编号：${job.id}\n状态：排队（queued）`);
+      return;
+    }
+    r = await executeTask(options);
   } catch (err) {
     if (err instanceof DshNotFoundError) {
       fail(`${err.message}\n请安装 DeepSeek Harness 或设置 DSH_BIN，然后运行 /deepseek:setup 检查环境。`);
     }
     fail(`启动 dsh 失败：${err.message}\n请运行 /deepseek:setup 检查环境。`);
-  }
-  let saveWarning;
-  if (r.ok && typeof r.threadId === "string" && r.threadId.trim()) {
-    try {
-      await updateState(workspaceRoot, (state) => {
-        state.resumableThread = { threadId: r.threadId, summary: r.final.trim().slice(0, 500) };
-      });
-    } catch (err) {
-      saveWarning = `可续接线程未能保存（线程 ID：${r.threadId}）：${err.message}`;
-      process.stderr.write(`警告：${saveWarning}\n`);
-    }
   }
   if (flags.json) {
     out(JSON.stringify({
@@ -73,7 +77,7 @@ async function cmdTask(argv) {
       reason: r.reason,
       exitCode: r.exitCode,
       error: r.error,
-      ...(saveWarning ? { resumableThreadSaved: false, warnings: [saveWarning] } : {}),
+      ...(r.warnings ? { resumableThreadSaved: false, warnings: r.warnings } : {}),
       ...(r.ok ? {} : { stdout: r.stdout, stderr: r.stderr }),
     }, null, 2));
     process.exitCode = r.ok ? 0 : 1;
@@ -176,7 +180,90 @@ function renderSetup(report) {
   return lines.join("\n");
 }
 
-const COMMANDS = { task: cmdTask, "task-resume-candidate": cmdTaskResumeCandidate, setup: cmdSetup };
+const statusNames = { queued: "排队", running: "运行", completed: "完成", failed: "失败", cancelled: "已取消" };
+async function cmdJob(command, argv) {
+  const { flags, positional } = parseArgs(argv, ["cwd", "timeout-ms"]);
+  if (positional.length > 1) fail("只能指定一个作业编号。", 2);
+  if ("timeout-ms" in flags && (!flags.wait || !/^\d+$/.test(flags["timeout-ms"] ?? "") || !Number.isSafeInteger(Number(flags["timeout-ms"])))) {
+    fail("--timeout-ms 必须与 --wait 配合，值为非负整数。", 2);
+  }
+  const root = resolveWorkspaceRoot(flags.cwd || process.cwd());
+  const id = positional[0];
+  const statusOptions = { wait: Boolean(flags.wait), all: Boolean(flags.all), timeoutMs: flags["timeout-ms"] === undefined ? undefined : Number(flags["timeout-ms"]) };
+  const result = command === "status" ? await (id ? jobStatus(root, id, statusOptions) : jobStatuses(root, statusOptions))
+    : command === "result" ? await jobResult(root, id) : await cancelJob(root, id);
+  if (flags.json) out(JSON.stringify(result, null, 2));
+  else if (command === "result") {
+    if (["review", "adversarial-review"].includes(result.kind)) out(renderReview(result));
+    else if (result.ok) out(result.final);
+    else out(`作业：${result.id}\n状态：${statusNames[result.status]}\n${result.error || "DeepSeek 任务失败。"}`);
+  } else {
+    const jobs = Array.isArray(result) ? result : [result];
+    out(jobs.length ? jobs.map((job) => [
+      `作业：${job.id}`, `种类：${job.kind}`, `状态：${statusNames[job.status]}（${job.status}）`,
+      ...(command === "status" ? [`耗时：${job.elapsedMs} 毫秒`, ...(job.timedOut ? ["等待超时，作业继续运行。"] : []), ...job.progress] : []),
+    ].join("\n")).join("\n\n") : "当前 Claude 会话没有作业。");
+  }
+}
+
+async function cmdReview(argv, kind) {
+  const { flags, text } = parseArgs(argv, ["cwd", "scope", "base", "model", "effort"]);
+  validateOverrides(flags);
+  for (const name of ["cwd", "scope", "base"]) {
+    if (name in flags && (typeof flags[name] !== "string" || !flags[name].trim() || flags[name].startsWith("--"))) {
+      fail(`--${name} 必须提供非空值。`, 2);
+    }
+  }
+  if (kind === "review" && text) fail("普通审阅不接收附加关注点，请用 adversarial-review。", 2);
+  const context = collectReviewContext(flags.cwd || process.cwd(), { scope: flags.scope, base: flags.base });
+  if (kind === "review-context") {
+    out(JSON.stringify({ scope: context.scope, baseRef: context.baseRef, fileCount: context.files.length,
+      diffBytes: context.diffBytes, empty: !context.files.length,
+      suggestedMode: context.files.length <= 2 && context.diffBytes <= 64 * 1024 ? "foreground" : "background" }, null, 2));
+    return;
+  }
+  if (!context.files.length) {
+    const message = "没有可审阅的变更。";
+    out(flags.json ? JSON.stringify({ ok: true, empty: true, ...context, message }, null, 2) : message);
+    return;
+  }
+  const options = { kind, prompt: reviewPrompt(context, { kind, focus: text }), cwd: context.root, model: flags.model, effort: flags.effort };
+  if (flags.background) {
+    const job = await startJob(context.root, options);
+    out(flags.json ? JSON.stringify(job, null, 2) : `作业编号：${job.id}\n种类：${kind}\n状态：排队（queued）`);
+    return;
+  }
+  const result = await executeReview(options);
+  const { events, stdout, stderr, timedOut, ...output } = result;
+  out(flags.json ? JSON.stringify({ ...output, ...(!result.ok ? { stdout, stderr } : {}) }, null, 2) : renderReview(result));
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+async function cmdTransfer(argv) {
+  const { flags, positional } = parseArgs(argv, ["cwd", "source", "max-chars"]);
+  if (positional.length || Object.keys(flags).some((name) => !["cwd", "source", "max-chars", "json"].includes(name))) {
+    fail("转交只接受 --source、--cwd、--max-chars、--json。", 2);
+  }
+  for (const name of ["source", "cwd"]) {
+    if (name in flags && (typeof flags[name] !== "string" || !flags[name].trim() || flags[name].startsWith("--"))) fail(`--${name} 必须提供有效路径。`, 2);
+  }
+  if ("max-chars" in flags && (!/^\d+$/.test(flags["max-chars"] ?? "") || Number(flags["max-chars"]) < 512 || Number(flags["max-chars"]) > 64000)) {
+    fail("--max-chars 必须为 512 到 64000 的整数。", 2);
+  }
+  const cwd = flags.cwd || process.cwd();
+  const source = resolveTranscript(cwd, flags.source);
+  const result = await transferSession({ cwd: resolveWorkspaceRoot(cwd), source, maxChars: flags["max-chars"] === undefined ? undefined : Number(flags["max-chars"]) });
+  out(flags.json ? JSON.stringify(result, null, 2) : result.ok ?
+    `DeepSeek 线程：${result.threadId}\n续接命令：${result.resumeCommand}\n${result.harnessInstructions}` +
+      (result.omittedTools || result.compressedMessages ? `\n长度预算：省略 ${result.omittedTools} 条旧工具概况，压缩 ${result.compressedMessages} 段早期文字。` : "") : result.error);
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+const COMMANDS = { task: cmdTask, "task-resume-candidate": cmdTaskResumeCandidate, setup: cmdSetup, transfer: cmdTransfer,
+  review: (argv) => cmdReview(argv, "review"), "adversarial-review": (argv) => cmdReview(argv, "adversarial-review"),
+  "review-context": (argv) => cmdReview(argv, "review-context"),
+  status: (argv) => cmdJob("status", argv), result: (argv) => cmdJob("result", argv), cancel: (argv) => cmdJob("cancel", argv),
+};
 
 async function main() {
   const [sub, ...rest] = process.argv.slice(2);
