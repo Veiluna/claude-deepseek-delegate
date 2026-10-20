@@ -43,3 +43,92 @@ test("持锁者在发布 owner 前暂停超过回收期限，两个竞争者仍�
   assert.equal(Atomics.load(counters, 2), 0, "暂停的旧持锁者进入了新持锁者的临界区");
   assert.deepEqual(fs.readdirSync(dir), []);
 });
+
+for (const code of ["EPERM", "EACCES"]) {
+  test(`锁 owner 短暂不可读（${code}）时等待原持锁者释放，不误报失败或并入临界区`, async (t) => {
+    const root = tmpDir("ds-lock-read-");
+    const oldData = process.env.CLAUDE_PLUGIN_DATA;
+    const oldCeiling = process.env.GIT_CEILING_DIRECTORIES;
+    process.env.CLAUDE_PLUGIN_DATA = path.join(root, "data");
+    process.env.GIT_CEILING_DIRECTORIES = path.dirname(root);
+    t.after(() => {
+      if (oldData === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = oldData;
+      if (oldCeiling === undefined) delete process.env.GIT_CEILING_DIRECTORIES; else process.env.GIT_CEILING_DIRECTORIES = oldCeiling;
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+    const lock = path.join(workspaceDir(root), "jobs", ".lock");
+    let releaseFirst;
+    let firstReady;
+    let firstActive = false;
+    const released = new Promise((resolve) => { releaseFirst = resolve; });
+    const ready = new Promise((resolve) => { firstReady = resolve; });
+    const first = withJobsLock(root, async () => {
+      firstActive = true;
+      firstReady();
+      await released;
+      firstActive = false;
+    });
+    await ready;
+    const readFile = fs.readFileSync;
+    let denied = 0;
+    t.mock.method(fs, "readFileSync", function (file, ...args) {
+      if (path.dirname(String(file)) === lock && !denied) {
+        denied++;
+        assert.equal(firstActive, true);
+        // 模拟 Windows owner 正被关闭或删除的窗口；下一微任务才允许原持有者解锁。
+        queueMicrotask(releaseFirst);
+        throw Object.assign(new Error("测试模拟锁文件暂时不可读"), { code });
+      }
+      return readFile.call(this, file, ...args);
+    });
+    let entered = false;
+    const second = withJobsLock(root, () => {
+      assert.equal(firstActive, false, "不能凭读取失败回收活锁");
+      entered = true;
+    });
+    try {
+      await Promise.all([first, second]);
+      assert.equal(denied, 1);
+      assert.equal(entered, true);
+      assert.equal(fs.existsSync(lock), false);
+    } finally {
+      releaseFirst();
+      await Promise.allSettled([first, second]);
+    }
+  });
+}
+
+for (const code of ["EPERM", "EACCES", "EEXIST", "ENOTEMPTY"]) {
+  test(`发布锁遇到 ${code} 而目标已消失时重试发布，不把竞争窗口当作作业失败`, async (t) => {
+    const root = tmpDir("ds-lock-rename-");
+    const oldData = process.env.CLAUDE_PLUGIN_DATA;
+    const oldCeiling = process.env.GIT_CEILING_DIRECTORIES;
+    process.env.CLAUDE_PLUGIN_DATA = path.join(root, "data");
+    process.env.GIT_CEILING_DIRECTORIES = path.dirname(root);
+    t.after(() => {
+      if (oldData === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = oldData;
+      if (oldCeiling === undefined) delete process.env.GIT_CEILING_DIRECTORIES; else process.env.GIT_CEILING_DIRECTORIES = oldCeiling;
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+    const lock = path.join(workspaceDir(root), "jobs", ".lock");
+    const rename = fs.renameSync;
+    let denied = 0;
+    t.mock.method(fs, "renameSync", function (source, target) {
+      if (String(target) === lock && !denied) {
+        denied++;
+        assert.equal(fs.existsSync(lock), false, "模拟竞争者已释放目标锁");
+        assert.equal(fs.readdirSync(source).length, 1, "尚未发布的 owner 必须仍完整保留");
+        throw Object.assign(new Error("测试模拟锁发布窗口"), { code });
+      }
+      return rename.call(this, source, target);
+    });
+    let entered = false;
+    await withJobsLock(root, () => {
+      assert.equal(fs.readdirSync(lock).length, 1, "必须原子发布 owner 后才能进入临界区");
+      entered = true;
+    });
+    assert.equal(denied, 1);
+    assert.equal(entered, true);
+    assert.equal(fs.existsSync(lock), false);
+  });
+}

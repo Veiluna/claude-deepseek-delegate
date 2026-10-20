@@ -63,12 +63,20 @@ export async function withJobsLock(root, fn) {
       if (Date.now() >= deadline) throw new Error("等待作业状态锁超时。");
       try { fs.renameSync(prepared, lock); acquired = true; break; }
       catch (err) {
-        if (!["EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(err.code) || !fs.existsSync(lock)) throw err;
+        // 竞争者可能已在 rename 失败后释放锁；目标消失同样应该重试原子发布。
+        if (!["EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(err.code)) throw err;
         try {
           for (const owner of fs.readdirSync(lock)) {
             const pid = Number(owner.split("-")[0]);
             if (!pid) continue;
-            const contents = fs.readFileSync(path.join(lock, owner), "utf8");
+            let contents;
+            try { contents = fs.readFileSync(path.join(lock, owner), "utf8"); }
+            catch (readError) {
+              // Windows 在 owner 关闭/删除期间可能短暂拒绝读取。
+              // 未读到身份就保留该 owner，只等待下轮，不能回收或进入临界区。
+              if (["EPERM", "EACCES"].includes(readError.code)) continue;
+              throw readError;
+            }
             // 旧版本空 owner 只在 PID 确实退出时回收，新 owner 必须核对创建时间。
             const instance = contents ? JSON.parse(contents) : null;
             const age = instance ? Date.now() - instance.publishedAt : Infinity;
