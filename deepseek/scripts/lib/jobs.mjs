@@ -153,7 +153,7 @@ export async function startJob(root, options) {
   return withJobsLock(root, async () => {
     const id = crypto.randomUUID();
     const job = {
-      id, kind: "task", status: "queued", pid: null, dshPid: null,
+      id, kind: options.kind || "task", status: "queued", pid: null, dshPid: null,
       createdAt: new Date().toISOString(), startedAt: null, finishedAt: null,
       claudeSessionId: currentSessionId(), workspaceRoot: root,
       logPath: jobFile(root, id, ".log"),
@@ -302,7 +302,7 @@ export async function jobResult(root, id) {
       .filter((j) => j.status === "completed").sort((a, b) => a.finishedAt.localeCompare(b.finishedAt)).at(-1);
     if (!job) throw new Error("当前项目没有已完成的作业。");
     if (active(job)) throw new Error(`作业尚未结束：${job.id}（${job.status}）`);
-    return { id: job.id, status: job.status, ...(job.result || { ok: false, final: null, error: job.error || "作业已取消。" }) };
+    return { id: job.id, kind: job.kind, status: job.status, ...(job.result || { ok: false, final: null, error: job.error || "作业已取消。" }) };
   });
 }
 

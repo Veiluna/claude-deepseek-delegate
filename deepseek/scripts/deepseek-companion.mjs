@@ -5,6 +5,8 @@ import { resolveWorkspaceRoot, loadState } from "./lib/state.mjs";
 import { runDsh, findDsh, dshVersion, DshNotFoundError } from "./lib/dsh.mjs";
 import { executeTask } from "./lib/task.mjs";
 import { startJob, jobStatus, jobStatuses, jobResult, cancelJob } from "./lib/jobs.mjs";
+import { collectReviewContext } from "./lib/review-git.mjs";
+import { executeReview, reviewPrompt, renderReview } from "./lib/review.mjs";
 
 function out(text) {
   process.stdout.write(text.endsWith("\n") ? text : text + "\n");
@@ -26,14 +28,18 @@ function describeFailure(r) {
   return lines.join("\n");
 }
 
-async function cmdTask(argv) {
-  const { flags, text } = parseArgs(argv, ["cwd", "expected-thread-id", "model", "effort"]);
+function validateOverrides(flags) {
   if ("model" in flags && (typeof flags.model !== "string" || !flags.model.trim() || flags.model.startsWith("--"))) {
     fail("--model <模型名> 必须提供非空模型名。", 2);
   }
   if ("effort" in flags && !["off", "low", "high", "max"].includes(flags.effort)) {
     fail("--effort 只允许 off、low、high、max。", 2);
   }
+}
+
+async function cmdTask(argv) {
+  const { flags, text } = parseArgs(argv, ["cwd", "expected-thread-id", "model", "effort"]);
+  validateOverrides(flags);
   if (flags.resume && flags.fresh) fail("--resume 与 --fresh 不能同时指定。", 2);
   const expectedThreadId = flags["expected-thread-id"];
   if ("expected-thread-id" in flags && (!flags.resume || typeof expectedThreadId !== "string" || !expectedThreadId.trim() || expectedThreadId.startsWith("--"))) {
@@ -187,7 +193,8 @@ async function cmdJob(command, argv) {
     : command === "result" ? await jobResult(root, id) : await cancelJob(root, id);
   if (flags.json) out(JSON.stringify(result, null, 2));
   else if (command === "result") {
-    if (result.ok) out(result.final);
+    if (["review", "adversarial-review"].includes(result.kind)) out(renderReview(result));
+    else if (result.ok) out(result.final);
     else out(`作业：${result.id}\n状态：${statusNames[result.status]}\n${result.error || "DeepSeek 任务失败。"}`);
   } else {
     const jobs = Array.isArray(result) ? result : [result];
@@ -198,7 +205,42 @@ async function cmdJob(command, argv) {
   }
 }
 
+async function cmdReview(argv, kind) {
+  const { flags, text } = parseArgs(argv, ["cwd", "scope", "base", "model", "effort"]);
+  validateOverrides(flags);
+  for (const name of ["cwd", "scope", "base"]) {
+    if (name in flags && (typeof flags[name] !== "string" || !flags[name].trim() || flags[name].startsWith("--"))) {
+      fail(`--${name} 必须提供非空值。`, 2);
+    }
+  }
+  if (kind === "review" && text) fail("普通审阅不接收附加关注点，请用 adversarial-review。", 2);
+  const context = collectReviewContext(flags.cwd || process.cwd(), { scope: flags.scope, base: flags.base });
+  if (kind === "review-context") {
+    out(JSON.stringify({ scope: context.scope, baseRef: context.baseRef, fileCount: context.files.length,
+      diffBytes: context.diffBytes, empty: !context.files.length,
+      suggestedMode: context.files.length <= 2 && context.diffBytes <= 64 * 1024 ? "foreground" : "background" }, null, 2));
+    return;
+  }
+  if (!context.files.length) {
+    const message = "没有可审阅的变更。";
+    out(flags.json ? JSON.stringify({ ok: true, empty: true, ...context, message }, null, 2) : message);
+    return;
+  }
+  const options = { kind, prompt: reviewPrompt(context, { kind, focus: text }), cwd: context.root, model: flags.model, effort: flags.effort };
+  if (flags.background) {
+    const job = await startJob(context.root, options);
+    out(flags.json ? JSON.stringify(job, null, 2) : `作业编号：${job.id}\n种类：${kind}\n状态：排队（queued）`);
+    return;
+  }
+  const result = await executeReview(options);
+  const { events, stdout, stderr, timedOut, ...output } = result;
+  out(flags.json ? JSON.stringify({ ...output, ...(!result.ok ? { stdout, stderr } : {}) }, null, 2) : renderReview(result));
+  process.exitCode = result.ok ? 0 : 1;
+}
+
 const COMMANDS = { task: cmdTask, "task-resume-candidate": cmdTaskResumeCandidate, setup: cmdSetup,
+  review: (argv) => cmdReview(argv, "review"), "adversarial-review": (argv) => cmdReview(argv, "adversarial-review"),
+  "review-context": (argv) => cmdReview(argv, "review-context"),
   status: (argv) => cmdJob("status", argv), result: (argv) => cmdJob("result", argv), cancel: (argv) => cmdJob("cancel", argv),
 };
 

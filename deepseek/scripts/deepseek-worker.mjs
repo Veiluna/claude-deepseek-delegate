@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import { executeTask } from "./lib/task.mjs";
+import { executeReview } from "./lib/review.mjs";
 import { withJobsLock, readJob, saveJob, readRequest } from "./lib/jobs.mjs";
 import { posixProcessIdentity } from "./lib/posix-process.mjs";
 
@@ -21,7 +22,8 @@ async function main() {
     fs.appendFileSync(job.logPath, "作业开始运行。\n");
     let ready;
     const spawned = new Promise((resolve) => { ready = resolve; });
-    pending = executeTask({ ...options, cwd: root, processGroup: false, ownerToken: job.id,
+    const execute = ["review", "adversarial-review"].includes(job.kind) ? executeReview : executeTask;
+    pending = execute({ ...options, cwd: root, processGroup: false, ownerToken: job.id,
       onPatch: async (patchPath) => { job.patchPath = patchPath; await saveJob(root, job); },
       onSpawn: async (pid, identity) => { job.dshPid = pid; if (identity) job.dshIdentity = identity; await saveJob(root, job); ready(); },
       onEvent: (line) => fs.appendFileSync(job.logPath, line + "\n"),
