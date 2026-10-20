@@ -1,0 +1,265 @@
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
+import { workspaceDir, writeJsonAtomic } from "./state.mjs";
+import { killTree } from "./dsh.mjs";
+import { windowsProcessAlive, ProcessIdentityMismatchError } from "./windows-process.mjs";
+import { posixProcessIdentity, posixProcessAlive, OWNER_ENV } from "./posix-process.mjs";
+import { selfProcessInstance, processInstanceAlive } from "./process-instance.mjs";
+
+const worker = fileURLToPath(new URL("../deepseek-worker.mjs", import.meta.url));
+const active = (job) => ["queued", "running"].includes(job.status);
+const directory = (root) => path.join(workspaceDir(root), "jobs");
+function jobFile(root, id, suffix = ".json") {
+  if (!/^[\w-]+$/.test(id ?? "")) throw new Error("无效的作业编号。");
+  return path.join(directory(root), id + suffix);
+}
+
+export function isAlive(pid, identity) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (process.platform === "win32" && identity) return windowsProcessAlive(pid, identity);
+  if (process.platform !== "win32" && identity) return posixProcessAlive(pid, identity);
+  try {
+    process.kill(pid, 0);
+    // 容器的 PID 1 可能延迟回收僵尸进程；它们已经不能继续执行作业。
+    if (process.platform === "linux" && fs.existsSync("/proc/self/stat")) {
+      const state = fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1)?.[0];
+      if (state === "Z" || state === "X") return false;
+    }
+    return true;
+  }
+  catch (err) { if (["ESRCH", "ENOENT"].includes(err.code)) return false; throw err; }
+}
+
+// 目录 rename 一次发布已写入 owner 的完整代际，不暴露可被回收的空锁。
+export async function withJobsLock(root, fn) {
+  const dir = directory(root);
+  const lock = path.join(dir, ".lock");
+  const token = `${process.pid}-${crypto.randomUUID()}`;
+  const prepared = path.join(dir, `.lock-${token}.tmp`);
+  const removeEmpty = (target) => {
+    try { fs.rmdirSync(target); }
+    catch (err) {
+      if (["ENOENT", "ENOTEMPTY", "EEXIST"].includes(err.code)) return;
+      // Windows 对非空目录也可能返回 EPERM/EACCES；只容忍确实已有新 owner 的情况。
+      if (["EPERM", "EACCES"].includes(err.code)) {
+        try { if (fs.readdirSync(target).length) return; }
+        catch (readError) { if (readError.code === "ENOENT") return; throw readError; }
+      }
+      throw err;
+    }
+  };
+  fs.mkdirSync(prepared);
+  let acquired = false;
+  try {
+    fs.writeFileSync(path.join(prepared, token), JSON.stringify({ ...selfProcessInstance(), publishedAt: Date.now() }), { flag: "wx" });
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      if (Date.now() >= deadline) throw new Error("等待作业状态锁超时。");
+      try { fs.renameSync(prepared, lock); acquired = true; break; }
+      catch (err) {
+        if (!["EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(err.code) || !fs.existsSync(lock)) throw err;
+        try {
+          for (const owner of fs.readdirSync(lock)) {
+            const pid = Number(owner.split("-")[0]);
+            if (!pid) continue;
+            const contents = fs.readFileSync(path.join(lock, owner), "utf8");
+            // 旧版本空 owner 只在 PID 确实退出时回收，新 owner 必须核对创建时间。
+            const instance = contents ? JSON.parse(contents) : null;
+            const age = instance ? Date.now() - instance.publishedAt : Infinity;
+            // 活锁只等待；延后昂贵的跨进程实例查询，避免轮询者错过短暂的解锁窗口。
+            // 宽限只延后查询，绝不会凭时间回收锁；回收仍必须确认原实例已退出。
+            const fresh = pid !== process.pid && age >= 0 && age < 2000;
+            const alive = fresh ? isAlive(pid) : instance ? processInstanceAlive(pid, instance) : isAlive(pid);
+            if (!alive) fs.rmSync(path.join(lock, owner), { force: true });
+          }
+          // 只删除空目录；旧回收者只能删除观察过的唯一 owner 文件，碰不到新代际。
+          removeEmpty(lock);
+        } catch (readError) { if (readError.code !== "ENOENT") throw readError; }
+        await delay(25);
+      }
+    }
+    return await fn();
+  } finally {
+    const owned = acquired ? lock : prepared;
+    fs.rmSync(path.join(owned, token), { force: true });
+    removeEmpty(owned);
+  }
+}
+
+export function readJob(root, id) {
+  const file = jobFile(root, id);
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); }
+  catch (err) {
+    if (err.code === "ENOENT") throw new Error(`找不到作业：${id}`);
+    throw new Error(`作业记录无法读取：${id}`);
+  }
+}
+
+export const saveJob = (root, job) => writeJsonAtomic(jobFile(root, job.id), job);
+const allJobs = (root) => fs.readdirSync(directory(root))
+  .filter((name) => name.endsWith(".json") && !name.endsWith(".request.json"))
+  .map((name) => readJob(root, name.slice(0, -5)))
+  .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+
+function stopJob(job, { recovering = false } = {}) {
+  // Windows 的 dshPid 是持有管道的独立宿主，不依赖 cmd.exe 的寿命。
+  for (const [pid, identity, isWorker] of [[job.dshPid, job.dshIdentity, false], [job.pid, job.workerIdentity, true]]) {
+    if (!pid) continue;
+    if (process.platform === "win32" && !identity) {
+      if (!isAlive(pid)) continue;
+      throw new Error("旧作业缺少 Windows 进程身份，无法安全清理；拒绝终止未经核对的 PID。");
+    }
+    if (process.platform === "win32" && isWorker && !isAlive(pid, identity)) continue;
+    if (process.platform !== "win32" && !identity) {
+      if (!isAlive(pid)) continue;
+      throw new Error("旧作业缺少 POSIX 进程身份，无法安全清理；拒绝终止未经核对的 PID。");
+    }
+    // 兼容 dsh 与 worker 共组的记录：组长的创建时间同样已持久化，
+    // 即使复用该 PGID 的普通进程没有作业环境标识，也能确认原组已消失。
+    const leader = process.platform === "win32" ? null : job.pid === identity?.pgid ? job.workerIdentity : job.dshPid === identity?.pgid ? job.dshIdentity : null;
+    const checked = leader ? { ...identity, groupLeaderStartTime: leader.startTime } : identity;
+    try { killTree({ pid, identity: checked }); }
+    catch (err) { if (!recovering || !(err instanceof ProcessIdentityMismatchError)) throw err; }
+  }
+  if (job.patchPath) {
+    const patch = path.resolve(job.patchPath);
+    const dir = path.dirname(patch);
+    // 只删除运行器创建的临时覆盖目录，不把记录中的任意路径当作删除目标。
+    if (path.basename(patch) !== "patch.json" || !path.basename(dir).startsWith("deepseek-patch-") ||
+      path.dirname(dir) !== path.resolve(os.tmpdir())) throw new Error("作业临时配置路径无效，未删除。");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function recover(root, job) {
+  if (active(job) && (job.cancelRequestedAt || !isAlive(job.pid, job.workerIdentity))) {
+    stopJob(job, { recovering: true });
+    job.status = job.cancelRequestedAt ? "cancelled" : "failed";
+    job.finishedAt = new Date().toISOString();
+    if (!job.cancelRequestedAt) job.error = "作业 worker 已退出，未留下完整结果。";
+    fs.rmSync(jobFile(root, job.id, ".request.json"), { force: true });
+    await saveJob(root, job);
+  }
+  return job;
+}
+
+export async function startJob(root, options) {
+  return withJobsLock(root, async () => {
+    const id = crypto.randomUUID();
+    const job = {
+      id, kind: "task", status: "queued", pid: null, dshPid: null,
+      createdAt: new Date().toISOString(), startedAt: null, finishedAt: null,
+      claudeSessionId: process.env.CLAUDE_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null,
+      logPath: jobFile(root, id, ".log"),
+      workerIdentity: process.platform === "win32" ? { script: worker, token: id } : null,
+    };
+    const jobs = allJobs(root);
+    // 先为新作业腾出位置；清理失败时不能发布一个没有 worker 的第 51 条记录。
+    for (const oldest of jobs.slice(0, Math.max(0, jobs.length - 49))) {
+      // 淘汰运行中的最旧作业时先清理进程，避免 worker 重建已删记录。
+      if (active(oldest)) stopJob(oldest, { recovering: true });
+      for (const suffix of [".log", ".request.json", ".json"]) fs.rmSync(jobFile(root, oldest.id, suffix), { force: true });
+    }
+    fs.writeFileSync(job.logPath, "");
+    await saveJob(root, job);
+    await writeJsonAtomic(jobFile(root, id, ".request.json"), options);
+    const fd = fs.openSync(job.logPath, "a");
+    let child;
+    try {
+      child = spawn(process.execPath, [worker, root, id, `--deepseek-owner=${id}`], {
+        cwd: root, detached: true, windowsHide: true, stdio: ["ignore", fd, fd],
+        env: { ...process.env, [OWNER_ENV]: id },
+      });
+      child.deepseekIdentity = job.workerIdentity;
+      await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+      job.pid = child.pid;
+      if (process.platform !== "win32") {
+        job.workerIdentity = posixProcessIdentity(child.pid, id);
+        child.deepseekIdentity = job.workerIdentity;
+      }
+      await saveJob(root, job);
+      child.unref();
+    } catch (err) {
+      // worker 正在等待同一把锁；先撤销任务，再尝试清理，清理失败不能放行它。
+      job.status = "failed";
+      job.finishedAt = new Date().toISOString();
+      job.error = `启动作业失败：${err.message}`;
+      fs.rmSync(jobFile(root, id, ".request.json"), { force: true });
+      await saveJob(root, job);
+      child?.unref();
+      if (child?.pid && child.deepseekIdentity) killTree(child);
+      throw err;
+    } finally { fs.closeSync(fd); }
+    return job;
+  });
+}
+
+function progress(job) {
+  let fd;
+  try { fd = fs.openSync(job.logPath, "r"); }
+  catch (err) { if (err.code === "ENOENT") return []; throw err; }
+  try {
+    const size = fs.fstatSync(fd).size;
+    const buffer = Buffer.alloc(Math.min(size, 16384));
+    fs.readSync(fd, buffer, 0, buffer.length, Math.max(0, size - buffer.length));
+    return buffer.toString("utf8").split(/\r?\n/).filter(Boolean).slice(-5).map((s) => s.slice(0, 500));
+  } finally { fs.closeSync(fd); }
+}
+
+export async function jobStatus(root, id, { wait = false, timeoutMs } = {}) {
+  const deadline = timeoutMs === undefined ? Infinity : Date.now() + timeoutMs;
+  for (;;) {
+    const job = await withJobsLock(root, async () => {
+      const selected = id ? readJob(root, id) : allJobs(root).at(-1);
+      if (!selected) throw new Error("当前项目没有作业。");
+      id = selected.id;
+      await recover(root, selected);
+      return { ...selected, progress: progress(selected) };
+    });
+    const timedOut = wait && active(job) && Date.now() >= deadline;
+    if (!wait || !active(job) || timedOut) return {
+      ...job, elapsedMs: Math.max(0, Date.parse(job.finishedAt || new Date().toISOString()) - Date.parse(job.startedAt || job.createdAt)),
+      ...(timedOut ? { timedOut: true } : {}),
+    };
+    await delay(Math.min(100, Math.max(1, deadline - Date.now())));
+  }
+}
+
+export async function jobResult(root, id) {
+  return withJobsLock(root, async () => {
+    const job = id ? await recover(root, readJob(root, id)) : allJobs(root)
+      .filter((j) => j.status === "completed").sort((a, b) => a.finishedAt.localeCompare(b.finishedAt)).at(-1);
+    if (!job) throw new Error("当前项目没有已完成的作业。");
+    if (active(job)) throw new Error(`作业尚未结束：${job.id}（${job.status}）`);
+    return { id: job.id, status: job.status, ...(job.result || { ok: false, final: null, error: job.error || "作业已取消。" }) };
+  });
+}
+
+export async function cancelJob(root, id) {
+  if (!id) throw new Error("cancel 必须提供作业编号。");
+  return withJobsLock(root, async () => {
+    const job = await recover(root, readJob(root, id));
+    if (active(job)) {
+      job.cancelRequestedAt = new Date().toISOString();
+      await saveJob(root, job);
+      stopJob(job);
+      job.status = "cancelled";
+      job.finishedAt = new Date().toISOString();
+      fs.rmSync(jobFile(root, id, ".request.json"), { force: true });
+      await saveJob(root, job);
+    }
+    return job;
+  });
+}
+
+export function readRequest(root, id) {
+  const file = jobFile(root, id, ".request.json");
+  const options = JSON.parse(fs.readFileSync(file, "utf8"));
+  fs.rmSync(file);
+  return options;
+}

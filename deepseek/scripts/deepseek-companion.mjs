@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import process from "node:process";
 import { parseArgs, splitRawArgs } from "./lib/args.mjs";
-import { resolveWorkspaceRoot, loadState, updateState } from "./lib/state.mjs";
+import { resolveWorkspaceRoot, loadState } from "./lib/state.mjs";
 import { runDsh, findDsh, dshVersion, DshNotFoundError } from "./lib/dsh.mjs";
+import { executeTask } from "./lib/task.mjs";
+import { startJob, jobStatus, jobResult, cancelJob } from "./lib/jobs.mjs";
 
 function out(text) {
   process.stdout.write(text.endsWith("\n") ? text : text + "\n");
@@ -37,7 +39,7 @@ async function cmdTask(argv) {
   if ("expected-thread-id" in flags && (!flags.resume || typeof expectedThreadId !== "string" || !expectedThreadId.trim() || expectedThreadId.startsWith("--"))) {
     fail("--expected-thread-id <线程ID> 必须与 --resume 配合，并提供非空线程 ID。", 2);
   }
-  if (!text) fail("用法：task [--resume [--expected-thread-id <线程ID>] | --fresh] [--model <模型名>] [--effort <off|low|high|max>] [--read-only] [--cwd <目录>] [--json] <任务描述>", 2);
+  if (!text) fail("用法：task [--background] [--resume [--expected-thread-id <线程ID>] | --fresh] [--model <模型名>] [--effort <off|low|high|max>] [--read-only] [--cwd <目录>] [--json] <任务描述>", 2);
   const workspaceRoot = resolveWorkspaceRoot(flags.cwd || process.cwd());
   const permissionMode = flags["read-only"] ? "read-only" : "workspace-write";
   const threadId = flags.resume ? loadState(workspaceRoot).resumableThread?.threadId : undefined;
@@ -47,23 +49,18 @@ async function cmdTask(argv) {
   }
   let r;
   try {
-    r = await runDsh({ prompt: text, cwd: workspaceRoot, permissionMode, threadId, model: flags.model, effort: flags.effort });
+    const options = { prompt: text, cwd: workspaceRoot, permissionMode, threadId, model: flags.model, effort: flags.effort };
+    if (flags.background) {
+      const job = await startJob(workspaceRoot, options);
+      out(flags.json ? JSON.stringify(job, null, 2) : `作业编号：${job.id}\n状态：排队（queued）`);
+      return;
+    }
+    r = await executeTask(options);
   } catch (err) {
     if (err instanceof DshNotFoundError) {
       fail(`${err.message}\n请安装 DeepSeek Harness 或设置 DSH_BIN，然后运行 /deepseek:setup 检查环境。`);
     }
     fail(`启动 dsh 失败：${err.message}\n请运行 /deepseek:setup 检查环境。`);
-  }
-  let saveWarning;
-  if (r.ok && typeof r.threadId === "string" && r.threadId.trim()) {
-    try {
-      await updateState(workspaceRoot, (state) => {
-        state.resumableThread = { threadId: r.threadId, summary: r.final.trim().slice(0, 500) };
-      });
-    } catch (err) {
-      saveWarning = `可续接线程未能保存（线程 ID：${r.threadId}）：${err.message}`;
-      process.stderr.write(`警告：${saveWarning}\n`);
-    }
   }
   if (flags.json) {
     out(JSON.stringify({
@@ -73,7 +70,7 @@ async function cmdTask(argv) {
       reason: r.reason,
       exitCode: r.exitCode,
       error: r.error,
-      ...(saveWarning ? { resumableThreadSaved: false, warnings: [saveWarning] } : {}),
+      ...(r.warnings ? { resumableThreadSaved: false, warnings: r.warnings } : {}),
       ...(r.ok ? {} : { stdout: r.stdout, stderr: r.stderr }),
     }, null, 2));
     process.exitCode = r.ok ? 0 : 1;
@@ -176,7 +173,30 @@ function renderSetup(report) {
   return lines.join("\n");
 }
 
-const COMMANDS = { task: cmdTask, "task-resume-candidate": cmdTaskResumeCandidate, setup: cmdSetup };
+const statusNames = { queued: "排队", running: "运行", completed: "完成", failed: "失败", cancelled: "已取消" };
+async function cmdJob(command, argv) {
+  const { flags, positional } = parseArgs(argv, ["cwd", "timeout-ms"]);
+  if (positional.length > 1) fail("只能指定一个作业编号。", 2);
+  if ("timeout-ms" in flags && (!flags.wait || !/^\d+$/.test(flags["timeout-ms"] ?? "") || !Number.isSafeInteger(Number(flags["timeout-ms"])))) {
+    fail("--timeout-ms 必须与 --wait 配合，值为非负整数。", 2);
+  }
+  const root = resolveWorkspaceRoot(flags.cwd || process.cwd());
+  const id = positional[0];
+  const result = command === "status" ? await jobStatus(root, id, { wait: Boolean(flags.wait), timeoutMs: flags["timeout-ms"] === undefined ? undefined : Number(flags["timeout-ms"]) })
+    : command === "result" ? await jobResult(root, id) : await cancelJob(root, id);
+  if (flags.json) out(JSON.stringify(result, null, 2));
+  else if (command === "result") {
+    if (result.ok) out(result.final);
+    else out(`作业：${result.id}\n状态：${statusNames[result.status]}\n${result.error || "DeepSeek 任务失败。"}`);
+  } else out([
+    `作业：${result.id}`, `种类：${result.kind}`, `状态：${statusNames[result.status]}（${result.status}）`,
+    ...(command === "status" ? [`耗时：${result.elapsedMs} 毫秒`, ...(result.timedOut ? ["等待超时，作业继续运行。"] : []), ...result.progress] : []),
+  ].join("\n"));
+}
+
+const COMMANDS = { task: cmdTask, "task-resume-candidate": cmdTaskResumeCandidate, setup: cmdSetup,
+  status: (argv) => cmdJob("status", argv), result: (argv) => cmdJob("result", argv), cancel: (argv) => cmdJob("cancel", argv),
+};
 
 async function main() {
   const [sub, ...rest] = process.argv.slice(2);

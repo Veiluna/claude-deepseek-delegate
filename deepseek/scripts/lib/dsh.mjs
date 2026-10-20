@@ -2,7 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { buildPatches, withPatch } from "./config-patch.mjs";
+import { killWindowsProcessTree } from "./windows-process.mjs";
+import { randomUUID } from "node:crypto";
+import { posixProcessIdentity, killPosixProcessTree, OWNER_ENV } from "./posix-process.mjs";
 
 // Appended to every message sent to DeepSeek (ADR-0004: headless has no approver).
 export const PREAMBLE = [
@@ -76,7 +80,18 @@ function dshCommand(bin, args) {
   return { command: bin, args, extra: {} };
 }
 
-function spawnDsh(bin, args, options) {
+export function spawnDsh(bin, args, options, ownerToken) {
+  if (ownerToken) {
+    const script = fileURLToPath(new URL("../deepseek-dsh-host.mjs", import.meta.url));
+    const child = spawn(process.execPath, [script, `--deepseek-owner=${ownerToken}`, bin, ...args], {
+      ...options, detached: true, windowsHide: true,
+      stdio: [...options.stdio, "ipc"],
+    });
+    if (process.platform === "win32") child.deepseekIdentity = { script, token: ownerToken };
+    child.deepseekManaged = true;
+    child.deepseekControl = true;
+    return child;
+  }
   const c = dshCommand(bin, args);
   return spawn(c.command, c.args, { ...options, ...c.extra });
 }
@@ -124,22 +139,28 @@ export function parseEvents(stdout) {
   return result;
 }
 
-function killTree(child) {
+export function killTree(child) {
+  if (!Number.isInteger(child.pid) || child.pid <= 0) return;
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], { windowsHide: true });
-  } else {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-    } catch {
-      child.kill("SIGKILL");
+    if (child.identity || child.deepseekIdentity) {
+      return killWindowsProcessTree(child.pid, child.identity || child.deepseekIdentity);
     }
+    const r = spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], { windowsHide: true, stdio: "ignore" });
+    if (r.error || r.status !== 0) {
+      try { process.kill(child.pid, 0); }
+      catch (err) { if (err.code === "ESRCH") return; throw err; }
+      throw new Error(`无法结束进程树：${child.pid}`);
+    }
+  } else {
+    return killPosixProcessTree(child.pid, child.identity || child.deepseekIdentity);
   }
 }
 
 // Run one headless turn. Resolves with { ok, exitCode, threadId, final, reason, error, timedOut, stdout, stderr }.
-export async function runDsh({ prompt, cwd, permissionMode, threadId, onEvent, timeoutMs, model, effort }) {
+export async function runDsh({ prompt, cwd, permissionMode, threadId, onEvent, onSpawn, onPatch, processGroup, ownerToken, timeoutMs, model, effort }) {
   const bin = findDsh();
-  const env = { ...process.env, DSH_PERMISSION_MODE: permissionMode };
+  if (process.platform !== "win32") ownerToken ||= randomUUID();
+  const env = { ...process.env, DSH_PERMISSION_MODE: permissionMode, ...(ownerToken ? { [OWNER_ENV]: ownerToken } : {}) };
   if (model !== undefined || effort !== undefined) {
     const c = dshCommand(bin, ["--profile", "headless", "--dump-config"]);
     let dump;
@@ -154,7 +175,8 @@ export async function runDsh({ prompt, cwd, permissionMode, threadId, onEvent, t
     if (dump.error || dump.status !== 0) throw new Error("读取 dsh 配置失败（--dump-config），未启动任务。");
     const patches = buildPatches(dump.stdout, { model, effort });
     return withPatch(patches, async (patch) => {
-      const result = await runTurn({ bin, env, prompt, cwd, threadId, timeoutMs, patch });
+      await onPatch?.(patch);
+      const result = await runTurn({ bin, env, prompt, cwd, threadId, onSpawn, processGroup, ownerToken, timeoutMs, patch });
       // dsh may echo config validation errors, including secrets from the patch.
       // Keep ordinary task output unchanged; overridden failures expose no raw stream.
       if (!result.ok) return {
@@ -164,10 +186,10 @@ export async function runDsh({ prompt, cwd, permissionMode, threadId, onEvent, t
       return result;
     });
   }
-  return runTurn({ bin, env, prompt, cwd, threadId, onEvent, timeoutMs });
+  return runTurn({ bin, env, prompt, cwd, threadId, onEvent, onSpawn, processGroup, ownerToken, timeoutMs });
 }
 
-function runTurn({ bin, env, prompt, cwd, threadId, onEvent, timeoutMs, patch }) {
+function runTurn({ bin, env, prompt, cwd, threadId, onEvent, onSpawn, processGroup, ownerToken, timeoutMs, patch }) {
   const args = ["--profile", "headless"];
   if (patch) args.push("--patch", patch);
   args.push("--json");
@@ -180,8 +202,10 @@ function runTurn({ bin, env, prompt, cwd, threadId, onEvent, timeoutMs, patch })
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // Own process group so a timeout can kill the whole tree.
-      detached: Boolean(timeoutMs) && process.platform !== "win32",
-    });
+      detached: (processGroup ?? Boolean(timeoutMs)) && process.platform !== "win32",
+    }, ownerToken);
+    let spawnFailure;
+    let reportedExitCode;
     let timedOut = false;
     const timer = timeoutMs
       ? setTimeout(() => {
@@ -209,12 +233,50 @@ function runTurn({ bin, env, prompt, cwd, threadId, onEvent, timeoutMs, patch })
     });
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
+      if (spawnFailure) { reject(spawnFailure); return; }
+      const hostFailed = child.deepseekControl && reportedExitCode === undefined && !timedOut;
+      if (hostFailed) {
+        try { killTree(child); }
+        catch (err) { err.cleanupPending = true; reject(err); return; }
+      }
+      const exitCode = reportedExitCode ?? code;
       const parsed = parseEvents(stdout);
       if (timedOut) parsed.error = `超时：${timeoutMs} 毫秒内没有结束，已终止`;
-      const ok = !timedOut && code === 0 && parsed.final !== null && parsed.reason === "completed";
-      resolve({ ok, exitCode: code, timedOut, ...parsed, stdout, stderr });
+      if (hostFailed) parsed.error = "作业宿主提前退出，未完成进程组清理。";
+      const ok = !hostFailed && !timedOut && exitCode === 0 && parsed.final !== null && parsed.reason === "completed";
+      resolve({ ok, exitCode, timedOut, ...parsed, stdout, stderr });
+    });
+    child.on("message", (message) => {
+      if (!child.deepseekControl || timedOut || reportedExitCode !== undefined ||
+        message?.type !== "deepseek-dsh-exit" || !Number.isInteger(message.exitCode)) return;
+      reportedExitCode = message.exitCode;
+      try { killTree(child); }
+      catch (err) {
+        // 宿主继续持有组归属；保留 PID 供下一次 status/cancel 重试清理。
+        err.cleanupPending = true;
+        if (timer) clearTimeout(timer);
+        child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
+        if (child.connected) child.disconnect();
+        child.unref?.();
+        reject(err);
+      }
     });
     child.stdin.on("error", () => {});
-    child.stdin.end(Buffer.from(prompt + PREAMBLE, "utf8"));
+    child.once("spawn", () => {
+      Promise.resolve().then(() => {
+        if (process.platform !== "win32") child.deepseekIdentity = posixProcessIdentity(child.pid, ownerToken);
+        return onSpawn?.(child.pid, child.deepseekIdentity);
+      }).then(() => {
+        child.stdin.end(Buffer.from(prompt + PREAMBLE, "utf8"));
+      }, (err) => {
+        spawnFailure = err;
+        // 正文尚未发送；托管宿主收到 EOF 会直接退出，真实 dsh 从未启动。
+        child.stdin.destroy();
+        if (!child.deepseekManaged) {
+          try { killTree(child); }
+          catch (cleanupError) { cleanupError.cleanupPending = true; reject(cleanupError); }
+        }
+      });
+    });
   });
 }
