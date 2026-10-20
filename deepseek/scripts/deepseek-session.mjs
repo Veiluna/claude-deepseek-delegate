@@ -1,0 +1,49 @@
+#!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { resolveWorkspaceRoot } from "./lib/state.mjs";
+import { cleanSessionJobs } from "./lib/jobs.mjs";
+
+const shellQuote = (value) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+const text = (value) => typeof value === "string" && value.length > 0 && !value.includes("\0");
+
+async function main() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  if (!text(input?.session_id)) throw new Error("无效的 Claude 会话编号。");
+  if (input.hook_event_name === "SessionEnd") {
+    const before = Date.now();
+    if (!text(input.cwd) || !path.isAbsolute(input.cwd)) throw new Error("无效的项目目录。");
+    const root = resolveWorkspaceRoot(input.cwd);
+    if (process.argv[2] === "--cleanup") {
+      if (!Number.isFinite(input.before)) throw new Error("无效的清理时刻。");
+      await cleanSessionJobs(root, input.session_id, { before: input.before });
+    } else {
+      // 插件 SessionEnd 的总预算默认只有 1.5 秒，不能用插件 timeout 延长。
+      // 独立进程完成清理，关闭输入后不保留父进程的终端或输出管道。
+      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "--cleanup"], {
+        cwd: root, detached: true, windowsHide: true, stdio: ["pipe", "ignore", "ignore"],
+      });
+      await new Promise((resolve, reject) => {
+        child.once("error", reject);
+        child.stdin.on("error", reject);
+        child.once("spawn", () => child.stdin.end(JSON.stringify({ hook_event_name: "SessionEnd", session_id: input.session_id, cwd: root, before }), resolve));
+      });
+      child.unref();
+    }
+    return;
+  }
+  if (input.hook_event_name !== "SessionStart" || !text(input.transcript_path) || !text(process.env.CLAUDE_ENV_FILE)) {
+    throw new Error("无效的 Claude 会话登记输入。");
+  }
+  // 只追加环境赋值，不读取会话记录、不输出上下文或分派规则（ADR-0002）。
+  fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `\nexport CLAUDE_SESSION_ID=${shellQuote(input.session_id)}\nexport CLAUDE_TRANSCRIPT_PATH=${shellQuote(input.transcript_path)}\n`);
+}
+
+main().catch(() => {
+  process.stderr.write("Claude 会话钩子失败，未完成登记或清理。\n");
+  process.exitCode = 1;
+});

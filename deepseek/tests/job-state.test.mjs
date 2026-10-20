@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { tmpDir } from "./helpers.mjs";
+import { tmpDir, makeFakeDshBin } from "./helpers.mjs";
 import { workspaceDir } from "../scripts/lib/state.mjs";
 import { saveJob, readJob, jobStatus, jobResult, withJobsLock, startJob, cancelJob } from "../scripts/lib/jobs.mjs";
 import { posixProcessIdentity, OWNER_ENV } from "../scripts/lib/posix-process.mjs";
@@ -49,6 +49,35 @@ test("取消进程中断后保留取消意图，恢复为已取消", async (t) =
   job.cancelRequestedAt = new Date().toISOString();
   await saveJob(root, job);
   assert.equal((await jobStatus(root, job.id)).status, "cancelled");
+});
+
+test("排队作业已有取消意图时 worker 不消费启动说明也不运行 dsh", async (t) => {
+  const { root, directory, job } = fixture(t);
+  const worker = fileURLToPath(new URL("../scripts/deepseek-worker.mjs", import.meta.url));
+  const record = path.join(root, "dsh-record.json");
+  const request = path.join(directory, "existing.request.json");
+  fs.writeFileSync(request, JSON.stringify({ prompt: "不能执行", permissionMode: "read-only" }));
+  job.cancelRequestedAt = new Date().toISOString();
+  let exited;
+  await withJobsLock(root, async () => {
+    const child = spawn(process.execPath, [worker, root, job.id], {
+      cwd: root, windowsHide: true, stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env, DSH_BIN: makeFakeDshBin(root), FAKE_DSH_RECORD: record },
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    exited = new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => resolve({ code, stderr }));
+    });
+    job.pid = child.pid;
+    await saveJob(root, job);
+  });
+  const result = await exited;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(fs.existsSync(record), false, "取消意图发布后不能再启动 dsh");
+  assert.equal(fs.existsSync(request), true);
+  assert.equal(readJob(root, job.id).status, "queued");
 });
 
 test("result 默认按完成时间选择，忽略更新的失败或运行中作业", async (t) => {

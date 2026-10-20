@@ -11,7 +11,7 @@ async function main() {
   await withJobsLock(root, async () => {
     job = readJob(root, id);
     // companion 必须先持久化启动成功；未完成登记的 worker 只能退出。
-    if (job.status !== "queued" || job.pid !== process.pid) return;
+    if (job.status !== "queued" || job.pid !== process.pid || job.cancelRequestedAt) return;
     job.pid = process.pid;
     if (process.platform !== "win32") job.workerIdentity = posixProcessIdentity(process.pid, id);
     const options = readRequest(root, id);

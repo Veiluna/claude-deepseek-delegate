@@ -13,6 +13,7 @@ import { selfProcessInstance, processInstanceAlive } from "./process-instance.mj
 
 const worker = fileURLToPath(new URL("../deepseek-worker.mjs", import.meta.url));
 const active = (job) => ["queued", "running"].includes(job.status);
+const currentSessionId = () => process.env.CLAUDE_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null;
 const directory = (root) => path.join(workspaceDir(root), "jobs");
 function jobFile(root, id, suffix = ".json") {
   if (!/^[\w-]+$/.test(id ?? "")) throw new Error("无效的作业编号。");
@@ -154,7 +155,7 @@ export async function startJob(root, options) {
     const job = {
       id, kind: "task", status: "queued", pid: null, dshPid: null,
       createdAt: new Date().toISOString(), startedAt: null, finishedAt: null,
-      claudeSessionId: process.env.CLAUDE_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null,
+      claudeSessionId: currentSessionId(), workspaceRoot: root,
       logPath: jobFile(root, id, ".log"),
       workerIdentity: process.platform === "win32" ? { script: worker, token: id } : null,
     };
@@ -211,23 +212,88 @@ function progress(job) {
   } finally { fs.closeSync(fd); }
 }
 
-export async function jobStatus(root, id, { wait = false, timeoutMs } = {}) {
+async function statuses(root, id, { wait = false, timeoutMs, claudeSessionId = currentSessionId(), all = false } = {}, list = false) {
   const deadline = timeoutMs === undefined ? Infinity : Date.now() + timeoutMs;
+  let ids;
   for (;;) {
-    const job = await withJobsLock(root, async () => {
-      const selected = id ? readJob(root, id) : allJobs(root).at(-1);
-      if (!selected) throw new Error("当前项目没有作业。");
-      id = selected.id;
-      await recover(root, selected);
-      return { ...selected, progress: progress(selected) };
+    const jobs = await withJobsLock(root, async () => {
+      let selected = ids ? ids.map((key) => readJob(root, key)) : id ? [readJob(root, id)] : allJobs(root);
+      if (!all) selected = selected.filter((job) => (job.claudeSessionId ?? null) === claudeSessionId);
+      if (!list) {
+        selected = selected.slice(-1);
+        if (!selected.length) throw new Error("当前 Claude 会话没有该作业，可用 --all 查看项目作业。");
+      }
+      ids ??= selected.map((job) => job.id);
+      for (const job of selected) await recover(root, job);
+      return selected.map((job) => ({ ...job, progress: progress(job) }));
     });
-    const timedOut = wait && active(job) && Date.now() >= deadline;
-    if (!wait || !active(job) || timedOut) return {
+    const timedOut = wait && jobs.some(active) && Date.now() >= deadline;
+    if (!wait || !jobs.some(active) || timedOut) return jobs.map((job) => ({
       ...job, elapsedMs: Math.max(0, Date.parse(job.finishedAt || new Date().toISOString()) - Date.parse(job.startedAt || job.createdAt)),
-      ...(timedOut ? { timedOut: true } : {}),
-    };
+      ...(timedOut && active(job) ? { timedOut: true } : {}),
+    }));
     await delay(Math.min(100, Math.max(1, deadline - Date.now())));
   }
+}
+
+export const jobStatus = async (root, id, options) => (await statuses(root, id, options))[0];
+export const jobStatuses = (root, options) => statuses(root, undefined, options, true);
+
+// 同一 Claude 会话可通过 --cwd 在多个项目创建作业。新记录保留根目录，
+// 当前根目录同时兼容 #6 未保存 workspaceRoot 的记录。
+export async function cleanSessionJobs(root, claudeSessionId, { before = Date.now() } = {}) {
+  if (typeof claudeSessionId !== "string" || !claudeSessionId) throw new Error("缺少所属 Claude 会话编号。");
+  const roots = new Set([root]);
+  const data = path.dirname(workspaceDir(root));
+  for (const entry of fs.readdirSync(data, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const project = path.join(data, entry.name);
+    const jobs = path.join(project, "jobs");
+    if (!fs.existsSync(jobs)) continue;
+    for (const name of fs.readdirSync(jobs).filter((name) => name.endsWith(".json") && !name.endsWith(".request.json"))) {
+      let record;
+      try { record = JSON.parse(fs.readFileSync(path.join(jobs, name), "utf8")); }
+      catch (err) { if (err.code === "ENOENT") continue; throw err; }
+      if (record.claudeSessionId === claudeSessionId && typeof record.workspaceRoot === "string" && path.isAbsolute(record.workspaceRoot) &&
+        path.resolve(workspaceDir(record.workspaceRoot)) === path.resolve(project)) roots.add(record.workspaceRoot);
+    }
+  }
+  const belongs = (job) => job.claudeSessionId === claudeSessionId && Date.parse(job.createdAt) <= before;
+  let failed = false;
+  for (const projectRoot of roots) {
+    const ids = await withJobsLock(projectRoot, () => allJobs(projectRoot).filter(belongs).map((job) => job.id));
+    for (const id of ids) {
+      const job = await withJobsLock(projectRoot, async () => {
+        if (!fs.existsSync(jobFile(projectRoot, id))) return null;
+        const current = readJob(projectRoot, id);
+        if (!belongs(current)) return null;
+        if (active(current)) {
+          current.cancelRequestedAt ||= new Date().toISOString();
+          await saveJob(projectRoot, current);
+        }
+        return current;
+      });
+      if (!job) continue;
+      // 先持久化取消意图，再在锁外结束进程树，其他 Claude 会话仍可更新状态。
+      // queued worker 也检查该意图，不会在释放锁后启动新的 dsh。
+      try { if (active(job)) stopJob(job, { recovering: true }); }
+      catch (err) {
+        failed = true;
+        await withJobsLock(projectRoot, async () => {
+          if (!fs.existsSync(jobFile(projectRoot, id))) return;
+          const current = readJob(projectRoot, id);
+          current.error = `Claude 会话结束时清理失败：${err.message}`;
+          await saveJob(projectRoot, current);
+        });
+        continue;
+      }
+      await withJobsLock(projectRoot, () => {
+        if (!fs.existsSync(jobFile(projectRoot, id)) || !belongs(readJob(projectRoot, id))) return;
+        for (const suffix of [".log", ".request.json", ".json"]) fs.rmSync(jobFile(projectRoot, id, suffix), { force: true });
+      });
+    }
+  }
+  if (failed) throw new Error("部分作业清理失败，已保留记录与取消意图供恢复。");
 }
 
 export async function jobResult(root, id) {

@@ -12,7 +12,7 @@ function json(t, cwd, args, env = {}) {
 }
 
 test("作业在父命令退出后继续执行，status --wait 和 result 能取回 final", () => {
-  const t = setup();
+  const t = setup({ CLAUDE_SESSION_ID: "claude-test-6" });
   const repo = makeGitRepo();
   const started = Date.now();
   const job = json(t, path.join(repo, "sub"), ["task", "--background", "--read-only", "检查代码"], {
@@ -347,7 +347,8 @@ test("status/result/cancel 命令通过内联 Bash 执行 companion 并传入插
   for (const command of ["status", "result", "cancel"]) {
     const text = fs.readFileSync(new URL(`../commands/${command}.md`, import.meta.url), "utf8");
     assert.match(text, /allowed-tools: Bash\(node:\*\)/);
-    assert.match(text, new RegExp('!`CLAUDE_PLUGIN_DATA="\\$\\{CLAUDE_PLUGIN_DATA\\}" node "\\$\\{CLAUDE_PLUGIN_ROOT\\}/scripts/deepseek-companion.mjs" ' + command + ' \\$ARGUMENTS`'));
+    const session = command === "status" ? ' CLAUDE_SESSION_ID="\\$\\{CLAUDE_SESSION_ID\\}"' : '';
+    assert.match(text, new RegExp('!`CLAUDE_PLUGIN_DATA="\\$\\{CLAUDE_PLUGIN_DATA\\}"' + session + ' node "\\$\\{CLAUDE_PLUGIN_ROOT\\}/scripts/deepseek-companion.mjs" ' + command + ' \\$ARGUMENTS`'));
   }
   for (const filename of ["../commands/task.md", "../agents/deepseek-agent.md"]) {
     assert.match(fs.readFileSync(new URL(filename, import.meta.url), "utf8"), /--background/);

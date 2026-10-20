@@ -4,7 +4,7 @@ import { parseArgs, splitRawArgs } from "./lib/args.mjs";
 import { resolveWorkspaceRoot, loadState } from "./lib/state.mjs";
 import { runDsh, findDsh, dshVersion, DshNotFoundError } from "./lib/dsh.mjs";
 import { executeTask } from "./lib/task.mjs";
-import { startJob, jobStatus, jobResult, cancelJob } from "./lib/jobs.mjs";
+import { startJob, jobStatus, jobStatuses, jobResult, cancelJob } from "./lib/jobs.mjs";
 
 function out(text) {
   process.stdout.write(text.endsWith("\n") ? text : text + "\n");
@@ -182,16 +182,20 @@ async function cmdJob(command, argv) {
   }
   const root = resolveWorkspaceRoot(flags.cwd || process.cwd());
   const id = positional[0];
-  const result = command === "status" ? await jobStatus(root, id, { wait: Boolean(flags.wait), timeoutMs: flags["timeout-ms"] === undefined ? undefined : Number(flags["timeout-ms"]) })
+  const statusOptions = { wait: Boolean(flags.wait), all: Boolean(flags.all), timeoutMs: flags["timeout-ms"] === undefined ? undefined : Number(flags["timeout-ms"]) };
+  const result = command === "status" ? await (id ? jobStatus(root, id, statusOptions) : jobStatuses(root, statusOptions))
     : command === "result" ? await jobResult(root, id) : await cancelJob(root, id);
   if (flags.json) out(JSON.stringify(result, null, 2));
   else if (command === "result") {
     if (result.ok) out(result.final);
     else out(`作业：${result.id}\n状态：${statusNames[result.status]}\n${result.error || "DeepSeek 任务失败。"}`);
-  } else out([
-    `作业：${result.id}`, `种类：${result.kind}`, `状态：${statusNames[result.status]}（${result.status}）`,
-    ...(command === "status" ? [`耗时：${result.elapsedMs} 毫秒`, ...(result.timedOut ? ["等待超时，作业继续运行。"] : []), ...result.progress] : []),
-  ].join("\n"));
+  } else {
+    const jobs = Array.isArray(result) ? result : [result];
+    out(jobs.length ? jobs.map((job) => [
+      `作业：${job.id}`, `种类：${job.kind}`, `状态：${statusNames[job.status]}（${job.status}）`,
+      ...(command === "status" ? [`耗时：${job.elapsedMs} 毫秒`, ...(job.timedOut ? ["等待超时，作业继续运行。"] : []), ...job.progress] : []),
+    ].join("\n")).join("\n\n") : "当前 Claude 会话没有作业。");
+  }
 }
 
 const COMMANDS = { task: cmdTask, "task-resume-candidate": cmdTaskResumeCandidate, setup: cmdSetup,
