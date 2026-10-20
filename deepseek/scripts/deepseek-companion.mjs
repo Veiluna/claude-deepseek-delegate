@@ -7,6 +7,7 @@ import { executeTask } from "./lib/task.mjs";
 import { startJob, jobStatus, jobStatuses, jobResult, cancelJob } from "./lib/jobs.mjs";
 import { collectReviewContext } from "./lib/review-git.mjs";
 import { executeReview, reviewPrompt, renderReview } from "./lib/review.mjs";
+import { resolveTranscript, transferSession } from "./lib/transfer.mjs";
 
 function out(text) {
   process.stdout.write(text.endsWith("\n") ? text : text + "\n");
@@ -238,7 +239,27 @@ async function cmdReview(argv, kind) {
   process.exitCode = result.ok ? 0 : 1;
 }
 
-const COMMANDS = { task: cmdTask, "task-resume-candidate": cmdTaskResumeCandidate, setup: cmdSetup,
+async function cmdTransfer(argv) {
+  const { flags, positional } = parseArgs(argv, ["cwd", "source", "max-chars"]);
+  if (positional.length || Object.keys(flags).some((name) => !["cwd", "source", "max-chars", "json"].includes(name))) {
+    fail("转交只接受 --source、--cwd、--max-chars、--json。", 2);
+  }
+  for (const name of ["source", "cwd"]) {
+    if (name in flags && (typeof flags[name] !== "string" || !flags[name].trim() || flags[name].startsWith("--"))) fail(`--${name} 必须提供有效路径。`, 2);
+  }
+  if ("max-chars" in flags && (!/^\d+$/.test(flags["max-chars"] ?? "") || Number(flags["max-chars"]) < 512 || Number(flags["max-chars"]) > 64000)) {
+    fail("--max-chars 必须为 512 到 64000 的整数。", 2);
+  }
+  const cwd = flags.cwd || process.cwd();
+  const source = resolveTranscript(cwd, flags.source);
+  const result = await transferSession({ cwd: resolveWorkspaceRoot(cwd), source, maxChars: flags["max-chars"] === undefined ? undefined : Number(flags["max-chars"]) });
+  out(flags.json ? JSON.stringify(result, null, 2) : result.ok ?
+    `DeepSeek 线程：${result.threadId}\n续接命令：${result.resumeCommand}\n${result.harnessInstructions}` +
+      (result.omittedTools || result.compressedMessages ? `\n长度预算：省略 ${result.omittedTools} 条旧工具概况，压缩 ${result.compressedMessages} 段早期文字。` : "") : result.error);
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+const COMMANDS = { task: cmdTask, "task-resume-candidate": cmdTaskResumeCandidate, setup: cmdSetup, transfer: cmdTransfer,
   review: (argv) => cmdReview(argv, "review"), "adversarial-review": (argv) => cmdReview(argv, "adversarial-review"),
   "review-context": (argv) => cmdReview(argv, "review-context"),
   status: (argv) => cmdJob("status", argv), result: (argv) => cmdJob("result", argv), cancel: (argv) => cmdJob("cancel", argv),
