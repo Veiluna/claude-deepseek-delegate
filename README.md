@@ -1,19 +1,21 @@
 # deepseek
 
-Claude Code 插件：通过本机 DeepSeek Harness 的 `dsh` 调用 DeepSeek，支持前台任务、后台作业、续接 DeepSeek 线程、只读审阅，以及把当前 Claude 会话整理成交接说明后转交。
+Claude Code 与 Codex 插件：通过本机 DeepSeek Harness 的 `dsh` 调用 DeepSeek。Claude Code 支持前台任务、后台作业、续接 DeepSeek 线程、只读审阅，以及把当前 Claude 会话整理成交接说明后转交；Codex 当前提供环境检查、前台任务与跨宿主续接。
 
-插件提供调用接口，调用时机由 Claude 与用户决定。版本为 `0.3.0`；marketplace 名仍为 `deepseek-delegate`，插件名已改为 `deepseek`。
+插件提供调用接口，调用时机由宿主与用户决定。版本为 `0.3.1`；marketplace 名仍为 `deepseek-delegate`，插件名为 `deepseek`。
 
 ## 前置条件
 
-- 已安装 Claude Code，`claude` 可在终端运行。
-- 已安装 Node.js 18 或更高版本，`node` 可在 Claude Code 使用的终端运行。本仓库在 Node.js 24 下验证。
+- 已安装 Claude Code 或 Codex，对应的 `claude` 或 `codex` 可在终端运行。Codex CLI 接口以本机 `0.162.1` 为基线。
+- 已安装 Node.js 18 或更高版本，`node` 可在宿主使用的终端运行。本仓库在 Node.js 24 下验证。
 - 已在本机安装 DeepSeek Harness 并完成登录；`dsh` 支持 `--profile headless --json`。认证使用 Harness 的登录状态，不需要为本插件配置 `DEEPSEEK_API_KEY`。
-- 在要工作的项目目录中启动 Claude Code。插件会将 dsh 的工作目录设为项目根目录；可用命令的 `--cwd <目录>` 明确指定项目。
+- 在要工作的项目目录中启动宿主。插件会将 dsh 的工作目录设为项目根目录；可用命令的 `--cwd <目录>` 明确指定项目。
 
-插件依次从环境变量 `DSH_BIN`、`PATH` 和默认安装位置查找 dsh。若找不到，可将 `DSH_BIN` 设置为 dsh 的完整路径（Windows 上通常是 `dsh.cmd`），重新启动 Claude Code 后运行 `/deepseek:setup`。
+插件依次从环境变量 `DSH_BIN`、`PATH` 和默认安装位置查找 dsh。若找不到，可将 `DSH_BIN` 设置为 dsh 的完整路径（Windows 上通常是 `dsh.cmd`），重新启动宿主后运行对应的 setup 入口。
 
 ## 安装
+
+### Claude Code
 
 在终端执行：
 
@@ -32,9 +34,35 @@ claude plugin install deepseek@deepseek-delegate --scope user
 
 它会报告共享数据根、项目目录、Node 版本、dsh 路径和版本，并通过一个最小只读任务检查 Harness 登录及调用是否可用。检查失败时按输出处理环境问题；插件不会自行修复环境。
 
+### Codex
+
+在终端运行正常插件安装命令：
+
+```bash
+codex plugin marketplace add Veiluna/claude-deepseek-delegate --ref main --json
+codex plugin add deepseek@deepseek-delegate --json
+codex plugin list --json
+```
+
+已有 marketplace 时用 `codex plugin marketplace upgrade deepseek-delegate` 刷新，再安装插件。本地开发可将第一条命令的仓库来源替换为仓库根目录的绝对路径。原生目录清单位于 `.agents/plugins/marketplace.json`，组件保留在 `deepseek/` 内；Codex skills 放在清单显式指定的 `codex-skills/`，避免覆盖 Claude 默认发现的同名命令。
+
+打开新的 Codex 聊天，确认 `deepseek:setup` 与 `deepseek:task` skills 可见，然后显式调用：
+
+```text
+$deepseek:setup
+$deepseek:task --fresh -- 为日期转换函数补充边界测试并实现修复
+$deepseek:task --resume --read-only -- 解释上次修改涉及的调用关系
+```
+
+这两个 skill 保持按能力可发现，不附带分派策略。Codex 当前只提供前台任务，支持 `--resume`、`--fresh`、`--read-only`、`--cwd`、`--model`、`--effort` 及 `--json`，续接选择规则与 Claude 相同。正文以 stdin 数据传递，保留原文及换行；有候选时询问一次，确认后候选变化则停止，不自动重试。后台作业、Codex 生命周期、审阅与转交入口尚未提供。
+
+安装时遵循 Codex 的正常确认与信任提示。当前 Codex 清单显式引用空钩子配置，防止误加载 Claude 钩子，不需要修改钩子信任记录。插件不会自动批准 dsh 的授权请求。
+
+本票验证为离线安装包复制及 fake-dsh CLI 测试；Windows 11 桌面端和 CLI 的真实安装、登录与权限验收另行执行。
+
 ## 共享数据与从 0.2.0 迁移
 
-新的 Claude 入口使用 `DEEPSEEK_DATA_DIR`，未设置时使用 `~/.deepseek-plugin/`。项目候选、作业和日志位于 `projects/<项目键>/`；`hosts/` 为宿主登记保留。Claude 与后续 Codex 入口使用同一个共享根，项目的 DeepSeek 线程可以跨宿主续接。
+Claude 与 Codex 入口使用 `DEEPSEEK_DATA_DIR`，未设置时使用 `~/.deepseek-plugin/`。项目候选、作业和日志位于 `projects/<项目键>/`；`hosts/` 为宿主登记保留。两端使用同一个共享根，项目的 DeepSeek 线程可以跨宿主续接。
 
 旧底层脚本仍兼容直接调用：未设置 `DEEPSEEK_DATA_DIR` 时使用 `CLAUDE_PLUGIN_DATA` 或旧默认目录，项目目录直接位于旧根下；设置共享变量后则使用其 `projects/`。新入口不会自动合并旧数据。普通 setup 若能读取 `CLAUDE_PLUGIN_DATA`，只提示该路径，不猜测旧目录。
 
@@ -43,6 +71,8 @@ claude plugin install deepseek@deepseek-delegate --scope user
 ```text
 /deepseek:setup --migrate-from "<旧插件数据目录>"
 ```
+
+Codex 使用 `$deepseek:setup --migrate-from "<旧插件数据目录>"` 显式调用同一迁移接口。
 
 迁移复制旧根的全部项目候选、明确终态作业及日志，保留未知字段并调整日志路径，源目录保持可用；本次不运行 dsh 连通性检查。活动作业、目标 `projects/` 已有任何数据（包括初始化的空项目目录）、损坏记录或不安全路径都会停止，不能用它覆盖合并目标。已有 `hosts/` 登记和普通环境检查不会阻断迁移。失败或中断不会发布半成品；停止旧调用后可显式重试，同级 `.projects.migration-*.tmp/` 暂存目录不会自动删除。新普通入口等待迁移完整发布后才读取项目。
 
@@ -146,6 +176,8 @@ claude plugin validate ./.claude-plugin/marketplace.json
 ```
 
 在 `deepseek/` 下运行 `npm test`。测试使用 fake dsh，不调用真实 dsh、不联网、不需要 Harness 登录。
+
+外部 CLI 接口 `node deepseek/scripts/deepseek-host.mjs codex [--session-id <真实编号>] task --fresh --prompt-stdin` 从 stdin 读取正文；身份参数放在命令前，缺失时保持未知。`--prompt-stdin` 与位置正文互斥，空白正文报错；不使用该选项的旧 CLI 参数语义保持兼容。skills 用固定 Node 启动代码从临时 JSON 请求文件构造参数数组，将正文放进子进程 stdin，不拼接到 shell。安装包测试会从原生 marketplace 复制完整目录并调用包内入口检查环境。
 
 ## 许可
 

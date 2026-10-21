@@ -1,0 +1,10 @@
+{
+  "name": "deepseek-delegate",
+  "interface": { "displayName": "DeepSeek" },
+  "plugins": [
+    {
+      "name": "deepseek",
+      "source": { "source": "local", "path": "./deepseek" }
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import process from "node:process";
 import { pathToFileURL } from "node:url";
-import { parseArgs, splitRawArgs } from "./lib/args.mjs";
+import { parseArgs, splitRawArgs, readPrompt } from "./lib/args.mjs";
 import { resolveWorkspaceRoot, loadState } from "./lib/state.mjs";
 import { runDsh, findDsh, dshVersion, DshNotFoundError } from "./lib/dsh.mjs";
 import { executeTask } from "./lib/task.mjs";
@@ -42,14 +42,18 @@ function validateOverrides(flags) {
 }
 
 async function cmdTask(argv) {
-  const { flags, text } = parseArgs(argv, ["cwd", "expected-thread-id", "model", "effort"]);
+  const parsed = parseArgs(argv, ["cwd", "expected-thread-id", "model", "effort"]);
+  const { flags } = parsed;
   validateOverrides(flags);
   if (flags.resume && flags.fresh) fail("--resume 与 --fresh 不能同时指定。", 2);
   const expectedThreadId = flags["expected-thread-id"];
   if ("expected-thread-id" in flags && (!flags.resume || typeof expectedThreadId !== "string" || !expectedThreadId.trim() || expectedThreadId.startsWith("--"))) {
     fail("--expected-thread-id <线程ID> 必须与 --resume 配合，并提供非空线程 ID。", 2);
   }
-  if (!text) fail("用法：task [--background] [--resume [--expected-thread-id <线程ID>] | --fresh] [--model <模型名>] [--effort <off|low|high|max>] [--read-only] [--cwd <目录>] [--json] <任务描述>", 2);
+  let text;
+  try { text = readPrompt(parsed); }
+  catch (err) { fail(err.message, 2); }
+  if (!text) fail("用法：task [--background] [--resume [--expected-thread-id <线程ID>] | --fresh] [--model <模型名>] [--effort <off|low|high|max>] [--read-only] [--cwd <目录>] [--json] [--prompt-stdin | <任务描述>]", 2);
   const workspaceRoot = resolveWorkspaceRoot(flags.cwd || process.cwd());
   const permissionMode = flags["read-only"] ? "read-only" : "workspace-write";
   const threadId = flags.resume ? loadState(workspaceRoot).resumableThread?.threadId : undefined;
