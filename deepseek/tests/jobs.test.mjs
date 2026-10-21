@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { setup, makeGitRepo } from "./helpers.mjs";
+import { createProcessTracker } from "./process-tracker.mjs";
 
 function json(t, cwd, args, env = {}) {
   const r = t.run([...args, "--json"], { cwd, env });
@@ -49,19 +50,13 @@ async function until(fn, describe = () => "") {
   }
 }
 
-function alive(pid) {
-  try {
-    process.kill(pid, 0);
-    if (process.platform === "linux" && fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.startsWith("Z")) return false;
-    return true;
-  } catch (err) { if (["ESRCH", "ENOENT"].includes(err.code)) return false; throw err; }
-}
-
 test("status 显示运行进度，等待超时不终止作业，取消结束整个进程树且可重复调用", async () => {
   const t = setup();
+  const processes = createProcessTracker();
+  const { alive } = processes;
   const repo = makeGitRepo();
   const tree = path.join(repo, "tree.jsonl");
-  const job = json(t, repo, ["task", "--background", "慢任务"], { FAKE_DSH_DELAY_MS: "30000", FAKE_DSH_TREE: tree });
+  const job = json(t, repo, ["task", "--background", "慢任务"], { FAKE_DSH_RELEASE_FILE: path.join(repo, "release-dsh"), FAKE_DSH_TREE: tree });
   try {
     await until(() => fs.existsSync(tree) && fs.readFileSync(tree, "utf8").trim().split("\n").length === 2);
     const running = json(t, repo, ["status", job.id, "--wait", "--timeout-ms", "50"]);
@@ -78,6 +73,7 @@ test("status 显示运行进度，等待超时不终止作业，取消结束整�
     assert.match(pending.stderr, /尚未结束/);
     const descendants = fs.readFileSync(tree, "utf8").trim().split("\n").map(JSON.parse);
     const fakePid = t.readRecord().pid;
+    processes.track(job.pid, fakePid, ...descendants.map(({ pid }) => pid));
     assert.ok(descendants.every(({ pid }) => alive(pid)));
     assert.equal(json(t, repo, ["cancel", job.id]).status, "cancelled");
     await until(() => [job.pid, fakePid, ...descendants.map(({ pid }) => pid)].every((pid) => !alive(pid)));
@@ -89,14 +85,17 @@ test("status 显示运行进度，等待超时不终止作业，取消结束整�
 
 test("worker 崩溃后 status 恢复为失败并清理仍存活的 dsh 后代", async (context) => {
   const t = setup();
+  const processes = createProcessTracker();
+  const { alive } = processes;
   const repo = makeGitRepo();
   const tree = path.join(repo, "tree.jsonl");
-  const job = json(t, repo, ["task", "--background", "慢任务"], { FAKE_DSH_DELAY_MS: "30000", FAKE_DSH_TREE: tree });
+  const job = json(t, repo, ["task", "--background", "慢任务"], { FAKE_DSH_RELEASE_FILE: path.join(repo, "release-dsh"), FAKE_DSH_TREE: tree });
   const recordPath = path.join(path.dirname(job.logPath), `${job.id}.json`);
   const selectState = ({ id, status, pid, dshPid, createdAt, startedAt, finishedAt, cancelRequestedAt, error }) => ({
     id, status, pid, dshPid, createdAt, startedAt, finishedAt, cancelRequestedAt, error,
   });
   const tracked = [{ role: "worker", pid: job.pid }];
+  processes.track(job.pid);
   const snapshots = {};
   const snapshot = () => {
     // 只输出状态和 PID，不把任务正文、配置、进度或结果写入诊断。
@@ -113,11 +112,12 @@ test("worker 崩溃后 status 恢复为失败并清理仍存活的 dsh 后代", 
     const stored = JSON.parse(fs.readFileSync(recordPath, "utf8"));
     tracked.push({ role: "dsh-root", pid: stored.dshPid }, { role: "fake-dsh", pid: t.readRecord().pid },
       ...fs.readFileSync(tree, "utf8").trim().split("\n").map(JSON.parse));
+    processes.track(...tracked.map(({ pid }) => pid));
     snapshots.beforeCrash = snapshot();
     assert.equal(stored.status, "running", describe());
     assert.ok(Number.isInteger(stored.dshPid) && alive(stored.dshPid), describe());
     assert.ok(tracked.every(({ pid }) => alive(pid)), describe());
-    process.kill(job.pid, "SIGKILL");
+    processes.kill(job.pid);
     await until(() => !alive(job.pid), describe);
     snapshots.beforeRecovery = snapshot();
     if (process.platform === "win32") {
@@ -137,7 +137,7 @@ test("worker 崩溃后 status 恢复为失败并清理仍存活的 dsh 后代", 
     finally {
       for (const pid of [...new Set(tracked.map(({ pid }) => pid))].reverse()) {
         if (!Number.isInteger(pid) || pid <= 0) continue;
-        try { if (alive(pid)) process.kill(pid, "SIGKILL"); }
+        try { processes.kill(pid); }
         catch (error) { context.diagnostic(`夹具清理失败：PID ${pid}，${error.code || error.name}`); }
       }
     }
@@ -147,23 +147,29 @@ test("worker 崩溃后 status 恢复为失败并清理仍存活的 dsh 后代", 
 for (const crashed of [false, true]) {
   test(`dsh 先退出后仍清理分离子孙进程，${crashed ? "worker 崩溃由 status 恢复" : "失败终态不遗留后代"}`, async () => {
     const t = setup();
+    const processes = createProcessTracker();
+    const { alive } = processes;
     const repo = makeGitRepo();
     const tree = path.join(repo, "orphan-tree.jsonl");
+    const release = path.join(repo, "release-dsh");
     const job = json(t, repo, ["task", "--background", "创建后代再失败"], {
-      FAKE_DSH_ORPHAN_TREE: tree, FAKE_DSH_DELAY_MS: "1500", FAKE_DSH_MODE: "exit-nonzero",
+      FAKE_DSH_ORPHAN_TREE: tree, FAKE_DSH_RELEASE_FILE: release, FAKE_DSH_MODE: "exit-nonzero",
     });
     const tracked = [job.pid];
+    processes.track(job.pid);
     try {
       await until(() => fs.existsSync(tree) && fs.readFileSync(tree, "utf8").trim().split("\n").length === 2);
       const stored = JSON.parse(fs.readFileSync(path.join(path.dirname(job.logPath), `${job.id}.json`), "utf8"));
       const fakePid = t.readRecord().pid;
       tracked.push(stored.dshPid, fakePid, ...fs.readFileSync(tree, "utf8").trim().split("\n").map((line) => JSON.parse(line).pid));
+      processes.track(...tracked);
       assert.ok(tracked.every(alive), "崩溃或自然退出前必须已创建真实的完整子孙树");
       if (crashed) {
-        process.kill(job.pid, "SIGKILL");
+        processes.kill(job.pid);
+        fs.writeFileSync(release, "exit");
         await until(() => !alive(job.pid) && !alive(fakePid));
         assert.ok(alive(stored.dshPid), "cmd/dsh 退出后仍必须保留可核实的宿主");
-      }
+      } else fs.writeFileSync(release, "exit");
       const done = json(t, repo, ["status", job.id, "--wait", "--timeout-ms", "15000"]);
       assert.equal(done.status, "failed");
       if (crashed) assert.match(done.error, /worker.*退出/);
@@ -172,7 +178,7 @@ for (const crashed of [false, true]) {
     } finally {
       t.run(["cancel", job.id], { cwd: repo });
       for (const pid of tracked.reverse()) {
-        try { if (alive(pid)) process.kill(pid, "SIGKILL"); } catch (err) { if (err.code !== "ESRCH") throw err; }
+        processes.kill(pid);
       }
     }
   });
@@ -180,38 +186,45 @@ for (const crashed of [false, true]) {
 
 test("宿主崩溃后整树结束，作业不带残留进程进入失败终态", async () => {
   const t = setup();
+  const processes = createProcessTracker();
+  const { alive } = processes;
   const repo = makeGitRepo();
   const tree = path.join(repo, "host-crash-tree.jsonl");
   const job = json(t, repo, ["task", "--background", "等待时崩溃"], {
-    FAKE_DSH_ORPHAN_TREE: tree, FAKE_DSH_DELAY_MS: "30000",
+    FAKE_DSH_ORPHAN_TREE: tree, FAKE_DSH_RELEASE_FILE: path.join(repo, "release-dsh"),
   });
   const tracked = [job.pid];
+  processes.track(job.pid);
   try {
     await until(() => fs.existsSync(tree) && fs.readFileSync(tree, "utf8").trim().split("\n").length === 2);
     const stored = JSON.parse(fs.readFileSync(path.join(path.dirname(job.logPath), `${job.id}.json`), "utf8"));
     tracked.push(stored.dshPid, t.readRecord().pid, ...fs.readFileSync(tree, "utf8").trim().split("\n").map((line) => JSON.parse(line).pid));
+    processes.track(...tracked);
     assert.ok(tracked.every(alive));
-    process.kill(stored.dshPid, "SIGKILL");
+    processes.kill(stored.dshPid);
     const done = json(t, repo, ["status", job.id, "--wait", "--timeout-ms", "15000"]);
     assert.equal(done.status, "failed");
     await until(() => tracked.every((pid) => !alive(pid)), () => JSON.stringify(tracked.map((pid) => ({ pid, alive: alive(pid) }))));
   } finally {
     t.run(["cancel", job.id], { cwd: repo });
     for (const pid of tracked.reverse()) {
-      try { if (alive(pid)) process.kill(pid, "SIGKILL"); } catch (err) { if (err.code !== "ESRCH") throw err; }
+      processes.kill(pid);
     }
   }
 });
 
 test("Windows cancel 拒绝归属不匹配的存活 PID，恢复正确身份后仍可取消", { skip: process.platform !== "win32" }, async () => {
   const t = setup();
+  const processes = createProcessTracker();
+  const { alive } = processes;
   const repo = makeGitRepo();
-  const job = json(t, repo, ["task", "--background", "慢任务"], { FAKE_DSH_DELAY_MS: "30000" });
+  const job = json(t, repo, ["task", "--background", "慢任务"], { FAKE_DSH_RELEASE_FILE: path.join(repo, "release-dsh") });
   const file = path.join(path.dirname(job.logPath), `${job.id}.json`);
   let original;
   try {
     await until(() => fs.existsSync(t.record));
     original = JSON.parse(fs.readFileSync(file, "utf8"));
+    processes.track(job.pid, original.dshPid, t.readRecord().pid);
     assert.ok(original.dshIdentity, "Windows 作业必须记录独立宿主身份");
     const stale = { ...original, dshIdentity: { ...original.dshIdentity, token: "00000000-0000-0000-0000-000000000000" } };
     // 模拟记录指向了其他作业的存活 PID；保留真实进程不动。
