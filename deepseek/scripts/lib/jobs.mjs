@@ -37,8 +37,11 @@ export function isAlive(pid, identity) {
 }
 
 // 目录 rename 一次发布已写入 owner 的完整代际，不暴露可被回收的空锁。
-export async function withJobsLock(root, fn) {
-  const dir = directory(root);
+export const withJobsLock = (root, fn) => withJobsDirectoryLock(directory(root), fn);
+
+// 同一个锁协议也用于尚未发布的共享根和无法还原项目路径的旧目录。
+export async function withJobsDirectoryLock(dir, fn) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const lock = path.join(dir, ".lock");
   const token = `${process.pid}-${crypto.randomUUID()}`;
   const prepared = path.join(dir, `.lock-${token}.tmp`);
@@ -54,7 +57,7 @@ export async function withJobsLock(root, fn) {
       throw err;
     }
   };
-  fs.mkdirSync(prepared);
+  fs.mkdirSync(prepared, { mode: 0o700 });
   let acquired = false;
   try {
     fs.writeFileSync(path.join(prepared, token), JSON.stringify({ ...selfProcessInstance(), publishedAt: Date.now() }), { flag: "wx" });

@@ -204,7 +204,7 @@ test("转交命令手动调用并显式传入登记路径；非法或缺值参�
   const command = fs.readFileSync(new URL("../commands/transfer.md", import.meta.url), "utf8");
   assert.match(command, /disable-model-invocation: true/);
   assert.match(command, /CLAUDE_TRANSCRIPT_PATH="\$\{CLAUDE_TRANSCRIPT_PATH\}"/);
-  assert.match(command, /CLAUDE_PLUGIN_DATA="\$\{CLAUDE_PLUGIN_DATA\}"/);
+  assert.match(command, /node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/deepseek-host\.mjs" claude transfer \$ARGUMENTS/);
   for (const flag of ["--source", "--max-chars", "--cwd", "--json"]) assert.ok(command.includes(flag));
   assert.match(command, /tui/);
   assert.match(command, /不会.*原 Claude 会话|原 Claude 会话.*不受影响/);

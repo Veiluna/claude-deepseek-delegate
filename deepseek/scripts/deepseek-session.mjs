@@ -2,14 +2,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { resolveWorkspaceRoot } from "./lib/state.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { dataRoot, resolveWorkspaceRoot } from "./lib/state.mjs";
 import { cleanSessionJobs } from "./lib/jobs.mjs";
 
 const shellQuote = (value) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
 const text = (value) => typeof value === "string" && value.length > 0 && !value.includes("\0");
 
-async function main() {
+export async function runSession(argv = process.argv.slice(2)) {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -17,8 +17,9 @@ async function main() {
   if (input.hook_event_name === "SessionEnd") {
     const before = Date.now();
     if (!text(input.cwd) || !path.isAbsolute(input.cwd)) throw new Error("无效的项目目录。");
+    if (process.env.DEEPSEEK_DATA_DIR && !fs.existsSync(dataRoot())) return;
     const root = resolveWorkspaceRoot(input.cwd);
-    if (process.argv[2] === "--cleanup") {
+    if (argv[0] === "--cleanup") {
       if (!Number.isFinite(input.before)) throw new Error("无效的清理时刻。");
       await cleanSessionJobs(root, input.session_id, { before: input.before });
     } else {
@@ -43,7 +44,7 @@ async function main() {
   fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `\nexport CLAUDE_SESSION_ID=${shellQuote(input.session_id)}\nexport CLAUDE_TRANSCRIPT_PATH=${shellQuote(input.transcript_path)}\n`);
 }
 
-main().catch(() => {
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) runSession().catch(() => {
   process.stderr.write("Claude 会话钩子失败，未完成登记或清理。\n");
   process.exitCode = 1;
 });

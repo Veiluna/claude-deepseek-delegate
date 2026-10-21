@@ -12,7 +12,7 @@ allowed-tools: Bash(node:*)
 $ARGUMENTS
 
 ```bash
-CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_TRANSCRIPT_PATH="${CLAUDE_TRANSCRIPT_PATH}" node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-companion.mjs" transfer $ARGUMENTS
+CLAUDE_TRANSCRIPT_PATH="${CLAUDE_TRANSCRIPT_PATH}" node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-host.mjs" claude transfer $ARGUMENTS
 ```
 
 示例中的 `$ARGUMENTS` 是参数占位符。实际调用 Bash 时逐参数使用安全的 shell 引号，路径中的空格、引号、`$()` 等字符作为数据传递，不把用户原文直接拼入 shell 命令。

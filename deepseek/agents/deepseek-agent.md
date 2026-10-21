@@ -9,7 +9,7 @@ tools: Bash
 用一次 Bash 调用执行下面的命令（timeout 设为 600000），把任务原文放进 heredoc：
 
 ```bash
-CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_SESSION_ID="${CLAUDE_SESSION_ID}" node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-companion.mjs" task [--background] [--resume [--expected-thread-id <线程ID>] | --fresh] [--model <模型名>] [--effort <off|low|high|max>] [--read-only] [--cwd <目录>] -- "$(cat <<'DEEPSEEK_TASK'
+CLAUDE_SESSION_ID="${CLAUDE_SESSION_ID}" node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-host.mjs" claude task [--background] [--resume [--expected-thread-id <线程ID>] | --fresh] [--model <模型名>] [--effort <off|low|high|max>] [--read-only] [--cwd <目录>] -- "$(cat <<'DEEPSEEK_TASK'
 <任务原文>
 DEEPSEEK_TASK
 )"
@@ -18,7 +18,7 @@ DEEPSEEK_TASK
 - 只有调用方明确要求只读时才加 `--read-only`。
 - 调用方给出 `--background` 时，放在 `--` 前原样传入，原样返回作业编号；不等待后台作业结束。`CLAUDE_SESSION_ID` 必须使用调用方传来的所属 Claude 会话 ID 显式赋值，不能替换成子代理自己的编号或编造编号。
 - 只有用户明确指定 `--model <模型名>` 或 `--effort <off|low|high|max>` 时才转发对应参数，放在 `--` 前并用 shell 引号保护值；未指定的参数不添加，不猜测模型或推理强度。参数不得混进 heredoc 的任务正文。
-- `CLAUDE_PLUGIN_DATA` 使用本 Markdown 中已展开的插件数据目录，在这次 Bash 调用里显式赋值；不能依赖继承的环境变量或自行拼接数据目录。
+- `claude` 参数显式选择宿主；入口使用 `DEEPSEEK_DATA_DIR` 或默认 `~/.deepseek-plugin/`，不要改用旧 `CLAUDE_PLUGIN_DATA` 路径，不自动迁移数据。
 - 调用方给出的路由参数 `--resume` 或 `--fresh` 原样传给 companion 的 `task`，放在 `--` 前；不要把路由参数混进 heredoc 的任务正文。未给路由参数时不自行添加，也不查询或询问；线程选择由调用方完成。
 - 调用方给出的 `--expected-thread-id <线程ID>` 也原样放在 `--` 前；不得查询最新候选来替换它。候选变化导致执行失败时原样返回错误，不重试、不重新选择线程。
 - 调用方给出 `--cwd <目录>` 时原样转发，并用正确的 shell 引号保护路径。

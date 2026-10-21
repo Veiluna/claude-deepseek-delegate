@@ -8,7 +8,7 @@ import { tmpDir } from "./helpers.mjs";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
-test("marketplace installation publishes only the complete deepseek 0.2.0 plugin", (t) => {
+test("marketplace installation publishes only the complete deepseek 0.3.0 plugin", (t) => {
   const marketplace = readJson(path.join(root, ".claude-plugin", "marketplace.json"));
   const installed = tmpDir("ds-release-");
   t.after(() => fs.rmSync(installed, { recursive: true, force: true }));
@@ -22,7 +22,7 @@ test("marketplace installation publishes only the complete deepseek 0.2.0 plugin
   const plugin = path.join(installed, "deepseek");
   const manifest = readJson(path.join(plugin, ".claude-plugin", "plugin.json"));
   assert.equal(manifest.name, "deepseek");
-  assert.equal(manifest.version, "0.2.0");
+  assert.equal(manifest.version, "0.3.0");
   assert.deepEqual(fs.readdirSync(path.join(plugin, "commands")).sort(), [
     "adversarial-review.md", "cancel.md", "result.md", "review.md",
     "setup.md", "status.md", "task.md", "transfer.md",
@@ -30,6 +30,7 @@ test("marketplace installation publishes only the complete deepseek 0.2.0 plugin
   for (const file of [
     "agents/deepseek-agent.md", "hooks/hooks.json", "scripts/deepseek-companion.mjs",
     "scripts/deepseek-session.mjs", "scripts/deepseek-worker.mjs", "scripts/lib/dsh.mjs",
+    "scripts/deepseek-host.mjs", "scripts/lib/host-context.mjs", "scripts/lib/migration.mjs", "scripts/lib/shared-data.mjs",
   ]) {
     assert.ok(fs.statSync(path.join(plugin, file)).isFile(), `missing installed file: ${file}`);
   }

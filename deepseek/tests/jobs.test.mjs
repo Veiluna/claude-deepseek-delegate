@@ -356,12 +356,12 @@ test("作业管理参数错误明确失败，编号不能越出项目目录", ()
   }
 });
 
-test("status/result/cancel 命令通过内联 Bash 执行 companion 并传入插件数据目录", () => {
+test("status/result/cancel 命令通过内联 Bash 显式选择 Claude 共享入口", () => {
   for (const command of ["status", "result", "cancel"]) {
     const text = fs.readFileSync(new URL(`../commands/${command}.md`, import.meta.url), "utf8");
     assert.match(text, /allowed-tools: Bash\(node:\*\)/);
-    const session = command === "status" ? ' CLAUDE_SESSION_ID="\\$\\{CLAUDE_SESSION_ID\\}"' : '';
-    assert.match(text, new RegExp('!`CLAUDE_PLUGIN_DATA="\\$\\{CLAUDE_PLUGIN_DATA\\}"' + session + ' node "\\$\\{CLAUDE_PLUGIN_ROOT\\}/scripts/deepseek-companion.mjs" ' + command + ' \\$ARGUMENTS`'));
+    const session = command === "status" ? 'CLAUDE_SESSION_ID="\\$\\{CLAUDE_SESSION_ID\\}" ' : '';
+    assert.match(text, new RegExp('!`' + session + 'node "\\$\\{CLAUDE_PLUGIN_ROOT\\}/scripts/deepseek-host.mjs" claude ' + command + ' \\$ARGUMENTS`'));
   }
   for (const filename of ["../commands/task.md", "../agents/deepseek-agent.md"]) {
     assert.match(fs.readFileSync(new URL(filename, import.meta.url), "utf8"), /--background/);

@@ -18,8 +18,9 @@ export function resolveWorkspaceRoot(cwd) {
   return path.resolve(cwd);
 }
 
-function dataRoot() {
-  return process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), ".claude", "plugins", "data", "deepseek");
+export function dataRoot() {
+  return process.env.DEEPSEEK_DATA_DIR ? path.join(process.env.DEEPSEEK_DATA_DIR, "projects")
+    : process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), ".claude", "plugins", "data", "deepseek");
 }
 
 export function workspaceDir(workspaceRoot) {
@@ -50,6 +51,10 @@ export function loadState(workspaceRoot) {
     if (err.code === "ENOENT") return { resumableThread: null };
     throw new Error(`读取项目状态失败：${err.message}`);
   }
+  return parseState(text, file);
+}
+
+export function parseState(text, file) {
   let state;
   try {
     state = JSON.parse(text);
@@ -82,20 +87,20 @@ export async function writeJsonAtomic(target, state) {
     } finally {
       fs.closeSync(fd);
     }
-    for (let attempt = 0; ; attempt++) {
-      try {
-        fs.renameSync(temporary, target);
-        break;
-      } catch (err) {
-        if (process.platform !== "win32" || !WINDOWS_RENAME_BUSY_CODES.has(err.code) || attempt >= WINDOWS_RENAME_RETRIES) {
-          throw err;
-        }
-        // A reader or another replacement can briefly prevent Windows from replacing the destination.
-        await delay(WINDOWS_RENAME_RETRY_DELAY_MS);
-      }
-    }
+    await renameAtomic(temporary, target);
   } finally {
     fs.rmSync(temporary, { force: true });
+  }
+}
+
+// JSON 快照与完整项目目录共用同一个 Windows 短暂占用重试协议。
+export async function renameAtomic(source, target) {
+  for (let attempt = 0; ; attempt++) {
+    try { fs.renameSync(source, target); return; }
+    catch (err) {
+      if (process.platform !== "win32" || !WINDOWS_RENAME_BUSY_CODES.has(err.code) || attempt >= WINDOWS_RENAME_RETRIES) throw err;
+      await delay(WINDOWS_RENAME_RETRY_DELAY_MS);
+    }
   }
 }
 
