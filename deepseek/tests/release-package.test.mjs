@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpDir } from "./helpers.mjs";
+import { spawnSync } from "node:child_process";
+import os from "node:os";
+import { tmpDir, setup } from "./helpers.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
-test("marketplace installation publishes only the complete deepseek 0.3.0 plugin", (t) => {
+test("marketplace installation publishes only the complete deepseek 0.3.1 plugin", (t) => {
   const marketplace = readJson(path.join(root, ".claude-plugin", "marketplace.json"));
   const installed = tmpDir("ds-release-");
   t.after(() => fs.rmSync(installed, { recursive: true, force: true }));
@@ -22,11 +24,17 @@ test("marketplace installation publishes only the complete deepseek 0.3.0 plugin
   const plugin = path.join(installed, "deepseek");
   const manifest = readJson(path.join(plugin, ".claude-plugin", "plugin.json"));
   assert.equal(manifest.name, "deepseek");
-  assert.equal(manifest.version, "0.3.0");
+  assert.equal(manifest.version, "0.3.1");
   assert.deepEqual(fs.readdirSync(path.join(plugin, "commands")).sort(), [
     "adversarial-review.md", "cancel.md", "result.md", "review.md",
     "setup.md", "status.md", "task.md", "transfer.md",
   ]);
+  // Claude 默认发现根 skills/；同名 skill 会优先于 commands/，不能泄漏 Codex 入口。
+  for (const command of fs.readdirSync(path.join(plugin, "commands"))) {
+    const name = path.basename(command, ".md");
+    assert.equal(fs.existsSync(path.join(plugin, "skills", name, "SKILL.md")), false,
+      `Claude command ${name} 被根 skills/ 中的同名 skill 覆盖`);
+  }
   for (const file of [
     "agents/deepseek-agent.md", "hooks/hooks.json", "scripts/deepseek-companion.mjs",
     "scripts/deepseek-session.mjs", "scripts/deepseek-worker.mjs", "scripts/lib/dsh.mjs",
@@ -34,6 +42,49 @@ test("marketplace installation publishes only the complete deepseek 0.3.0 plugin
   ]) {
     assert.ok(fs.statSync(path.join(plugin, file)).isFile(), `missing installed file: ${file}`);
   }
+});
+
+test("Codex marketplace 安装包发现 task/setup 且从包内运行共享环境检查", (t) => {
+  const marketplace = readJson(path.join(root, ".agents", "plugins", "marketplace.json"));
+  assert.equal(marketplace.name, "deepseek-delegate");
+  assert.equal(marketplace.plugins.length, 1);
+  const entry = marketplace.plugins[0];
+  assert.equal(entry.name, "deepseek");
+  assert.equal(entry.source.source, "local");
+  const installed = tmpDir("ds-codex-package-");
+  const fake = setup();
+  t.after(() => {
+    fs.rmSync(installed, { recursive: true, force: true });
+    fs.rmSync(path.dirname(fake.data), { recursive: true, force: true });
+  });
+  const plugin = path.join(installed, entry.name);
+  fs.cpSync(path.resolve(root, entry.source.path), plugin, { recursive: true });
+  const manifest = readJson(path.join(plugin, ".codex-plugin", "plugin.json"));
+  assert.equal(manifest.name, "deepseek");
+  assert.equal(manifest.version, "0.3.1");
+  assert.equal(manifest.version, readJson(path.join(plugin, ".claude-plugin", "plugin.json")).version);
+  assert.equal(manifest.skills, "./codex-skills/");
+  assert.deepEqual(fs.readdirSync(path.join(plugin, manifest.skills)).sort(), ["setup", "task"]);
+  for (const name of ["setup", "task"]) {
+    const skill = fs.readFileSync(path.join(plugin, manifest.skills, name, "SKILL.md"), "utf8");
+    assert.match(skill, new RegExp(`^---\\r?\\nname: ${name}\\r?\\n`));
+  }
+  // 显式空配置替代默认发现，不能在 Codex 执行 Claude 生命周期脚本。
+  assert.deepEqual(readJson(path.join(plugin, manifest.hooks)), { hooks: {} });
+  const r = spawnSync(process.execPath, [path.join(plugin, "scripts", "deepseek-host.mjs"),
+    "codex", "--session-id", "installed-codex-session", "setup", "--json"], {
+    cwd: installed, encoding: "utf8", env: {
+      ...process.env, DEEPSEEK_DATA_DIR: path.join(installed, "shared"),
+      DSH_BIN: fake.bin, FAKE_DSH_RECORD: fake.record,
+      GIT_CEILING_DIRECTORIES: fs.realpathSync(os.tmpdir()),
+    },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const report = JSON.parse(r.stdout);
+  assert.equal(report.ready, true);
+  assert.equal(report.hostContext.host, "codex");
+  assert.equal(report.hostContext.sessionId, "installed-codex-session");
+  assert.equal(fake.readRecord().permissionMode, "read-only");
 });
 
 test("release tree no longer contains the retired deepseek-delegate plugin", () => {
