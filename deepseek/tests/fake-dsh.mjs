@@ -80,6 +80,8 @@ process.stdin.on("end", async () => {
   }
   emit({ type: "status", phase: "turn_start" });
   emit({ type: "text", text: "这不是最终回复（截断）：" + "x".repeat(8000) });
+  // 由测试显式放行自然退出，避免采集完整进程实例时与固定延迟竞速。
+  while (process.env.FAKE_DSH_RELEASE_FILE && !fs.existsSync(process.env.FAKE_DSH_RELEASE_FILE)) await delay(10);
   await delay(Number(process.env.FAKE_DSH_DELAY_MS) || 0);
   switch (mode) {
     case "no-session":
