@@ -18,10 +18,10 @@ $ARGUMENTS
 1. 用 Bash 查询当前项目的可续接线程：
 
    ```bash
-   CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-companion.mjs" task-resume-candidate --json
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-host.mjs" claude task-resume-candidate --json
    ```
 
-   `CLAUDE_PLUGIN_DATA` 的值使用 Claude Code 在本 Markdown 中展开的路径，在每次 Bash 调用中显式传入，不能依赖 Bash 已导出它。用户指定 `--cwd <目录>` 时，查询也传同一个 `--cwd <目录>`，用正确的 shell 引号保护路径。保留这次查询返回的 `threadId` 和 `summary`，只查询候选，不执行任务。查询失败时展示错误并停止，不把查询失败当成没有候选。
+   `claude` 显式选择宿主；共享数据根使用 `DEEPSEEK_DATA_DIR`，未设置时使用 `~/.deepseek-plugin/`，不从 `CLAUDE_PLUGIN_DATA` 自动搬迁数据。用户指定 `--cwd <目录>` 时，查询也传同一个 `--cwd <目录>`，用正确的 shell 引号保护路径。保留这次查询返回的 `threadId` 和 `summary`，只查询候选，不执行任务。查询失败时展示错误并停止，不把查询失败当成没有候选。
 
 2. 只有候选查询退出码为 0 且 JSON 解析成功时才继续；状态读取失败、状态损坏或查询输出无法解析时，展示错误并停止，不能默认 `--fresh`。只把任务描述前的 `--resume`、`--fresh` 当作路由参数；`--` 后的文字属于任务描述。两者同时出现时提示互斥并停止。用户已明确指定其中一个时沿用选择，不再询问。没有指定时：
    - `available` 为 `false`：选择 `--fresh`，不询问。

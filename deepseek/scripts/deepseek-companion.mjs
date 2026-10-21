@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 import { parseArgs, splitRawArgs } from "./lib/args.mjs";
 import { resolveWorkspaceRoot, loadState } from "./lib/state.mjs";
 import { runDsh, findDsh, dshVersion, DshNotFoundError } from "./lib/dsh.mjs";
@@ -8,6 +9,8 @@ import { startJob, jobStatus, jobStatuses, jobResult, cancelJob } from "./lib/jo
 import { collectReviewContext } from "./lib/review-git.mjs";
 import { executeReview, reviewPrompt, renderReview } from "./lib/review.mjs";
 import { resolveTranscript, transferSession } from "./lib/transfer.mjs";
+import { dataRoot } from "./lib/state.mjs";
+import { migrateData } from "./lib/migration.mjs";
 
 function out(text) {
   process.stdout.write(text.endsWith("\n") ? text : text + "\n");
@@ -109,8 +112,15 @@ function looksLikeLoginFailure(text) {
   return /not logged in|log ?in|unauthori[sz]ed|authenticat|\b401\b|登录|认证/i.test(text);
 }
 
-async function cmdSetup(argv) {
-  const { flags } = parseArgs(argv);
+async function cmdSetup(argv, context) {
+  const { flags, positional } = parseArgs(argv, ["migrate-from"]);
+  if ("migrate-from" in flags) {
+    if (typeof flags["migrate-from"] !== "string" || !flags["migrate-from"].trim() || flags["migrate-from"].startsWith("--") || positional.length ||
+      Object.keys(flags).some((name) => !["migrate-from", "json"].includes(name))) throw new Error("迁移只接受 --migrate-from <旧数据根> 和 --json。");
+    const migration = await migrateData(flags["migrate-from"], dataRoot());
+    out(flags.json ? JSON.stringify({ migration }, null, 2) : `迁移完成：${migration.projects} 个项目，${migration.jobs} 个作业；源目录已保留。`);
+    return;
+  }
   const nodeOk = Number(process.versions.node.split(".")[0]) >= MIN_NODE_MAJOR;
   const report = {
     ready: false,
@@ -118,6 +128,8 @@ async function cmdSetup(argv) {
     dsh: { found: false, path: null, version: null, error: null },
     minimalTask: null,
     suggestions: [],
+    ...(context ? { hostContext: context } : {}),
+    data: { root: process.env.DEEPSEEK_DATA_DIR || dataRoot(), projects: dataRoot(), legacySource: process.env.CLAUDE_PLUGIN_DATA || null },
   };
   if (!nodeOk) report.suggestions.push(`升级 Node 到 ${MIN_NODE_MAJOR} 或更高版本。`);
   try {
@@ -160,6 +172,10 @@ async function cmdSetup(argv) {
 
 function renderSetup(report) {
   const lines = [`Node：${report.node.version}${report.node.ok ? "" : `（需要 ${MIN_NODE_MAJOR} 或更高）`}`];
+  lines.push(`数据根：${report.data.root}`, `项目数据：${report.data.projects}`);
+  if (report.data.legacySource && report.data.legacySource !== report.data.root) {
+    lines.push(`旧插件目录（仅提示，未迁移）：${report.data.legacySource}`);
+  }
   if (report.dsh.found) {
     lines.push(`dsh：${report.dsh.path}（${report.dsh.version ?? "版本未知"}）`);
   } else {
@@ -265,14 +281,14 @@ const COMMANDS = { task: cmdTask, "task-resume-candidate": cmdTaskResumeCandidat
   status: (argv) => cmdJob("status", argv), result: (argv) => cmdJob("result", argv), cancel: (argv) => cmdJob("cancel", argv),
 };
 
-async function main() {
-  const [sub, ...rest] = process.argv.slice(2);
+export async function runCompanion(argv, { hostContext } = {}) {
+  const [sub, ...rest] = argv;
   const handler = COMMANDS[sub];
   if (!handler) fail(`未知子命令：${sub ?? "(空)"}。可用：${Object.keys(COMMANDS).join("、")}`, 2);
-  await handler(splitRawArgs(rest));
+  await handler(splitRawArgs(rest), hostContext);
 }
 
-main().catch((err) => {
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) runCompanion(process.argv.slice(2)).catch((err) => {
   process.stderr.write(`DeepSeek 命令失败：${err.message}\n`);
   process.exitCode = 1;
 });

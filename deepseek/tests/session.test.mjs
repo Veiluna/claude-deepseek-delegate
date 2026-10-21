@@ -15,7 +15,7 @@ test("插件只注册 SessionStart 与 SessionEnd，会话状态命令显式传�
   assert.deepEqual(Object.keys(config.hooks).sort(), ["SessionEnd", "SessionStart"]);
   for (const event of Object.values(config.hooks)) {
     assert.equal(event.length, 1);
-    assert.deepEqual(event[0].hooks, [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-session.mjs"' }]);
+    assert.deepEqual(event[0].hooks, [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-host.mjs" claude session' }]);
   }
   const status = fs.readFileSync(new URL("../commands/status.md", import.meta.url), "utf8");
   assert.match(status, /CLAUDE_SESSION_ID="\$\{CLAUDE_SESSION_ID\}"/);
@@ -26,7 +26,7 @@ test("插件只注册 SessionStart 与 SessionEnd，会话状态命令显式传�
 function runHook(fixture, payload, extra = {}, args = []) {
   return spawnSync(process.execPath, [hook, ...args], {
     cwd: payload.cwd, input: JSON.stringify(payload), encoding: "utf8",
-    env: { ...process.env, CLAUDE_PLUGIN_DATA: fixture.data,
+    env: { ...process.env, DEEPSEEK_DATA_DIR: "", CLAUDE_PLUGIN_DATA: fixture.data,
       GIT_CEILING_DIRECTORIES: fs.realpathSync(os.tmpdir()), ...extra },
   });
 }

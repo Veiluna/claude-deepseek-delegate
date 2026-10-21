@@ -261,7 +261,8 @@ test("审阅预检包含未跟踪变更规模并建议执行方式，两个命�
     assert.match(text, /建议/);
     assert.match(text, /前台/);
     assert.match(text, /后台/);
-    assert.match(text, /CLAUDE_PLUGIN_DATA="\$\{CLAUDE_PLUGIN_DATA\}"/);
+    assert.match(text, /node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/deepseek-host\.mjs" claude review-context/);
+    assert.match(text, new RegExp('node "\\$\\{CLAUDE_PLUGIN_ROOT\\}/scripts/deepseek-host\\.mjs" claude ' + command + ' \\$ARGUMENTS'));
     assert.match(text, /CLAUDE_SESSION_ID="\$\{CLAUDE_SESSION_ID\}"/);
     for (const flag of ["--base", "--scope", "--model", "--effort", "--background", "--json"]) assert.ok(text.includes(flag));
   }

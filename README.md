@@ -2,7 +2,7 @@
 
 Claude Code 插件：通过本机 DeepSeek Harness 的 `dsh` 调用 DeepSeek，支持前台任务、后台作业、续接 DeepSeek 线程、只读审阅，以及把当前 Claude 会话整理成交接说明后转交。
 
-插件提供调用接口，调用时机由 Claude 与用户决定。版本为 `0.2.0`；marketplace 名仍为 `deepseek-delegate`，插件名已改为 `deepseek`。
+插件提供调用接口，调用时机由 Claude 与用户决定。版本为 `0.3.0`；marketplace 名仍为 `deepseek-delegate`，插件名已改为 `deepseek`。
 
 ## 前置条件
 
@@ -30,7 +30,21 @@ claude plugin install deepseek@deepseek-delegate --scope user
 /deepseek:setup
 ```
 
-它会报告 Node 版本、dsh 路径和版本，并通过一个最小只读任务检查 Harness 登录及调用是否可用。检查失败时按输出处理环境问题；插件不会自行修复环境。
+它会报告共享数据根、项目目录、Node 版本、dsh 路径和版本，并通过一个最小只读任务检查 Harness 登录及调用是否可用。检查失败时按输出处理环境问题；插件不会自行修复环境。
+
+## 共享数据与从 0.2.0 迁移
+
+新的 Claude 入口使用 `DEEPSEEK_DATA_DIR`，未设置时使用 `~/.deepseek-plugin/`。项目候选、作业和日志位于 `projects/<项目键>/`；`hosts/` 为宿主登记保留。Claude 与后续 Codex 入口使用同一个共享根，项目的 DeepSeek 线程可以跨宿主续接。
+
+旧底层脚本仍兼容直接调用：未设置 `DEEPSEEK_DATA_DIR` 时使用 `CLAUDE_PLUGIN_DATA` 或旧默认目录，项目目录直接位于旧根下；设置共享变量后则使用其 `projects/`。新入口不会自动合并旧数据。普通 setup 若能读取 `CLAUDE_PLUGIN_DATA`，只提示该路径，不猜测旧目录。
+
+升级已有 `deepseek` 0.2.0 数据时，先停止旧调用，在运行任何项目任务或候选查询前显式执行（路径以实际旧插件数据目录为准）：
+
+```text
+/deepseek:setup --migrate-from "<旧插件数据目录>"
+```
+
+迁移复制旧根的全部项目候选、明确终态作业及日志，保留未知字段并调整日志路径，源目录保持可用；本次不运行 dsh 连通性检查。活动作业、目标 `projects/` 已有任何数据（包括初始化的空项目目录）、损坏记录或不安全路径都会停止，不能用它覆盖合并目标。已有 `hosts/` 登记和普通环境检查不会阻断迁移。失败或中断不会发布半成品；停止旧调用后可显式重试，同级 `.projects.migration-*.tmp/` 暂存目录不会自动删除。新普通入口等待迁移完整发布后才读取项目。
 
 ## 从旧版迁移
 
@@ -44,7 +58,7 @@ claude plugin install deepseek@deepseek-delegate --scope user
 
 卸载范围应与原安装一致：原来安装在 `project` 或 `local` 范围的，将卸载命令的 `--scope user` 改为对应范围。若旧插件安装在多个范围，分别卸载，避免旧规则继续加载。
 
-不再需要本插件专用的 `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`；确认其他工具不依赖后可自行移除。新插件不读取这些变量，默认模型与推理强度沿用 Harness 设置，仅在命令显式指定时覆盖本次调用。旧版插件状态不会转换为新插件的可续接线程或作业。
+不再需要本插件专用的 `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`；确认其他工具不依赖后可自行移除。新插件不读取这些变量，默认模型与推理强度沿用 Harness 设置，仅在命令显式指定时覆盖本次调用。已退役 `deepseek-delegate` 的状态不会转换为新插件的可续接线程或作业；已有 `deepseek` 0.2.0 数据按上节显式迁移。
 
 退出旧 Claude 会话并打开新会话，确认 `/deepseek:*` 命令和 `deepseek:deepseek-agent` 子代理可见，再运行 `/deepseek:setup`。新会话开始时不应出现旧版自动分派规则；新插件的会话钩子只登记 Claude 会话信息，并在会话结束时清理所属后台作业。
 
@@ -54,7 +68,7 @@ claude plugin install deepseek@deepseek-delegate --scope user
 
 | 命令 | 用途与主要选项 |
 | --- | --- |
-| `/deepseek:setup [--json]` | 检查 Node、dsh 与最小只读任务。 |
+| `/deepseek:setup [--migrate-from <旧插件数据目录>] [--json]` | 报告数据根并检查 Node、dsh；显式迁移时只复制旧数据。 |
 | `/deepseek:task [选项] -- <任务描述>` | 执行任务；支持 `--background`、`--resume` 或 `--fresh`、`--model <模型名>`、`--effort <强度>`、`--read-only`、`--cwd <目录>`。 |
 | `/deepseek:status [作业编号] [选项]` | 查看状态、耗时及最近进度；支持 `--all`、`--wait`、`--timeout-ms <毫秒>`、`--cwd <目录>`、`--json`。 |
 | `/deepseek:result [作业编号] [--cwd <目录>] [--json]` | 取回最终结果；省略编号时取当前项目最近完成的作业。 |

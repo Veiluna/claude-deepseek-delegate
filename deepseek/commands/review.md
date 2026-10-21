@@ -16,7 +16,7 @@ $ARGUMENTS
 先用同一组参数预检范围与规模，不启动 dsh：
 
 ```bash
-CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_SESSION_ID="${CLAUDE_SESSION_ID}" node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-companion.mjs" review-context $ARGUMENTS
+CLAUDE_SESSION_ID="${CLAUDE_SESSION_ID}" node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-host.mjs" claude review-context $ARGUMENTS
 ```
 
 预检失败时展示错误并停止。`empty` 为 true 时展示“没有可审阅的变更。”并停止。最多 2 个文件且差异不超过 64 KiB 时建议前台；更多文件、更大差异或规模不明时建议后台。未跟踪文件也计入规模，不能仅凭已跟踪 diff 为空判定无变更。
@@ -24,7 +24,7 @@ CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_SESSION_ID="${CLAUDE_SESSION_I
 用户已指定 `--background` 时直接沿用；用户已明确选择前台时也不再询问。否则说明上述建议，用一次 `AskUserQuestion` 提供“前台等待”“后台运行”两个选项，推荐项放在前面。后台选择增加 `--background`，前台选择不传该参数；除此之外保留用户参数，不改写范围、模型或推理强度。
 
 ```bash
-CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_SESSION_ID="${CLAUDE_SESSION_ID}" node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-companion.mjs" review $ARGUMENTS
+CLAUDE_SESSION_ID="${CLAUDE_SESSION_ID}" node "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-host.mjs" claude review $ARGUMENTS
 ```
 
 默认 `--scope auto`：有本地变更时审阅暂存、未暂存及未跟踪内容；工作树干净时审阅当前分支相对基准分支的已提交差异。`--scope working-tree` 固定本地范围；`--scope branch` 固定提交范围。`--base` 指定分支比较的基准，使用共同祖先，不包含本地未提交内容，不能与 `--scope working-tree` 同用。自动基准依次查找 origin/HEAD、main、master、trunk；无法确定时报告错误，不 fetch。
