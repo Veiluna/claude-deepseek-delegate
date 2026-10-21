@@ -1,13 +1,13 @@
 ---
 name: task
-description: 通过本机 DeepSeek Harness 执行前台任务并原样返回最终回复；支持新开或续接 DeepSeek 线程、只读权限、工作目录及按次模型和推理强度覆盖。
+description: 通过本机 DeepSeek Harness 执行前台任务或后台作业；支持新开或续接 DeepSeek 线程、只读权限、工作目录及按次模型和推理强度覆盖。
 ---
 
-读取本文件目录下 `../../references/codex-cli.md`，按其中的数据传递方式调用共享宿主入口。此入口提供前台任务；用户指定 `--background` 时停止并说明当前 Codex skill 尚未提供作业入口，不自行改成前台执行。
+读取本文件目录下 `../../references/codex-cli.md`，按其中的数据传递方式调用共享宿主入口。用户指定 `--background` 时启动作业并返回编号；否则等待前台最终回复。
 
 ## 选择 DeepSeek 线程
 
-只解析任务正文之前的选项：`--fresh`、`--resume`、`--read-only`、`--cwd <目录>`、`--model <模型名>`、`--effort <off|low|high|max>`、`--json`。`--` 后始终是原始任务正文，保留引号、换行、首尾空白与形似选项的文本。`--fresh` 与 `--resume` 同时出现时停止。
+只解析任务正文之前的选项：`--background`、`--fresh`、`--resume`、`--read-only`、`--cwd <目录>`、`--model <模型名>`、`--effort <off|low|high|max>`、`--json`。`--` 后始终是原始任务正文，保留引号、换行、首尾空白与形似选项的文本。`--fresh` 与 `--resume` 同时出现时停止。
 
 1. 先发一次 `args: ["task-resume-candidate", "--json"]` 请求；用户指定 `--cwd` 时追加同一个目录。只有退出码为 0 且 JSON 解析成功时继续。查询失败或状态损坏时展示错误并停止。
 2. 用户已指定 `--fresh` 或 `--resume` 时沿用，不询问。未指定且 `available:false` 时选择 `--fresh`；有候选时展示返回的 `summary`，询问一次“继续可续接线程，还是新开 DeepSeek 线程？”，提供“继续”和“新开”。用当前宿主可用的提问工具；没有该工具时向用户提问并等待下一条回复。明确选择前不启动任务；取消或没有选择时停止，不代选或重复询问。
@@ -18,3 +18,5 @@ description: 通过本机 DeepSeek Harness 执行前台任务并原样返回最�
 将请求的 `args` 设为 `["task", "--prompt-stdin", <选定的路由参数>, <用户的其他选项>]`，`prompt` 设为任务原文，不把正文放进 `args`。`--read-only` 仅在用户明确要求只读时添加；权限逐次决定，不继承 DeepSeek 线程。模型与推理强度仅在用户指定时添加，否则沿用 Harness 设置。`--cwd` 与候选查询保持一致。
 
 只启动一次。等待同一个执行完成，轮询正在运行的进程不会重新启动任务。原样展示 stdout、stderr 和退出状态，最终结果仅以共享核心返回的 `final` 为准；流中的截断进度不是最终回复。候选变化、调用失败或授权被拒绝时停止，不自动重试或扩大权限。成功但候选保存失败时也展示警告及线程 ID，任务已完成，不再次执行。
+
+后台返回编号后本次启动完成，后续按用户请求使用 status、result 或 cancel。后台要求当前 Codex 主线程有有效的 SessionStart 登记；身份缺失、未登记或登记损坏时展示错误，按正常 `/hooks` 流程检查启用与信任，不生成身份、猜测父线程或改写登记。

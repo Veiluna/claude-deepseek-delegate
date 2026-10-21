@@ -1,7 +1,7 @@
 {
   "name": "deepseek",
-  "version": "0.3.1",
-  "description": "通过本机 DeepSeek Harness（dsh）检查环境、执行前台任务及续接 DeepSeek 线程",
+  "version": "0.3.2",
+  "description": "通过本机 DeepSeek Harness（dsh）检查环境、执行任务、续接 DeepSeek 线程及管理所属作业",
   "skills": "./codex-skills/",
   "hooks": "./hooks/codex-hooks.json"
 }

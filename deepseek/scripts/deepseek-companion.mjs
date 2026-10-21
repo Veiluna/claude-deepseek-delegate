@@ -41,7 +41,7 @@ function validateOverrides(flags) {
   }
 }
 
-async function cmdTask(argv) {
+async function cmdTask(argv, hostContext) {
   const parsed = parseArgs(argv, ["cwd", "expected-thread-id", "model", "effort"]);
   const { flags } = parsed;
   validateOverrides(flags);
@@ -65,7 +65,7 @@ async function cmdTask(argv) {
   try {
     const options = { prompt: text, cwd: workspaceRoot, permissionMode, threadId, model: flags.model, effort: flags.effort };
     if (flags.background) {
-      const job = await startJob(workspaceRoot, options);
+      const job = await startJob(workspaceRoot, options, { hostContext });
       out(flags.json ? JSON.stringify(job, null, 2) : `作业编号：${job.id}\n状态：排队（queued）`);
       return;
     }
@@ -201,7 +201,7 @@ function renderSetup(report) {
 }
 
 const statusNames = { queued: "排队", running: "运行", completed: "完成", failed: "失败", cancelled: "已取消" };
-async function cmdJob(command, argv) {
+async function cmdJob(command, argv, hostContext) {
   const { flags, positional } = parseArgs(argv, ["cwd", "timeout-ms"]);
   if (positional.length > 1) fail("只能指定一个作业编号。", 2);
   if ("timeout-ms" in flags && (!flags.wait || !/^\d+$/.test(flags["timeout-ms"] ?? "") || !Number.isSafeInteger(Number(flags["timeout-ms"])))) {
@@ -209,9 +209,9 @@ async function cmdJob(command, argv) {
   }
   const root = resolveWorkspaceRoot(flags.cwd || process.cwd());
   const id = positional[0];
-  const statusOptions = { wait: Boolean(flags.wait), all: Boolean(flags.all), timeoutMs: flags["timeout-ms"] === undefined ? undefined : Number(flags["timeout-ms"]) };
+  const statusOptions = { hostContext, wait: Boolean(flags.wait), all: Boolean(flags.all), timeoutMs: flags["timeout-ms"] === undefined ? undefined : Number(flags["timeout-ms"]) };
   const result = command === "status" ? await (id ? jobStatus(root, id, statusOptions) : jobStatuses(root, statusOptions))
-    : command === "result" ? await jobResult(root, id) : await cancelJob(root, id);
+    : command === "result" ? await jobResult(root, id, { hostContext }) : await cancelJob(root, id, { hostContext });
   if (flags.json) out(JSON.stringify(result, null, 2));
   else if (command === "result") {
     if (["review", "adversarial-review"].includes(result.kind)) out(renderReview(result));
@@ -222,11 +222,11 @@ async function cmdJob(command, argv) {
     out(jobs.length ? jobs.map((job) => [
       `作业：${job.id}`, `种类：${job.kind}`, `状态：${statusNames[job.status]}（${job.status}）`,
       ...(command === "status" ? [`耗时：${job.elapsedMs} 毫秒`, ...(job.timedOut ? ["等待超时，作业继续运行。"] : []), ...job.progress] : []),
-    ].join("\n")).join("\n\n") : "当前 Claude 会话没有作业。");
+    ].join("\n")).join("\n\n") : hostContext ? "当前宿主会话没有作业。" : "当前 Claude 会话没有作业。");
   }
 }
 
-async function cmdReview(argv, kind) {
+async function cmdReview(argv, kind, hostContext) {
   const { flags, text } = parseArgs(argv, ["cwd", "scope", "base", "model", "effort"]);
   validateOverrides(flags);
   for (const name of ["cwd", "scope", "base"]) {
@@ -249,7 +249,7 @@ async function cmdReview(argv, kind) {
   }
   const options = { kind, prompt: reviewPrompt(context, { kind, focus: text }), cwd: context.root, model: flags.model, effort: flags.effort };
   if (flags.background) {
-    const job = await startJob(context.root, options);
+    const job = await startJob(context.root, options, { hostContext });
     out(flags.json ? JSON.stringify(job, null, 2) : `作业编号：${job.id}\n种类：${kind}\n状态：排队（queued）`);
     return;
   }
@@ -280,9 +280,9 @@ async function cmdTransfer(argv) {
 }
 
 const COMMANDS = { task: cmdTask, "task-resume-candidate": cmdTaskResumeCandidate, setup: cmdSetup, transfer: cmdTransfer,
-  review: (argv) => cmdReview(argv, "review"), "adversarial-review": (argv) => cmdReview(argv, "adversarial-review"),
+  review: (argv, context) => cmdReview(argv, "review", context), "adversarial-review": (argv, context) => cmdReview(argv, "adversarial-review", context),
   "review-context": (argv) => cmdReview(argv, "review-context"),
-  status: (argv) => cmdJob("status", argv), result: (argv) => cmdJob("result", argv), cancel: (argv) => cmdJob("cancel", argv),
+  status: (argv, context) => cmdJob("status", argv, context), result: (argv, context) => cmdJob("result", argv, context), cancel: (argv, context) => cmdJob("cancel", argv, context),
 };
 
 export async function runCompanion(argv, { hostContext } = {}) {

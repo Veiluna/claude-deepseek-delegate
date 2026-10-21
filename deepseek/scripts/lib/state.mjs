@@ -23,12 +23,16 @@ export function dataRoot() {
     : process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), ".claude", "plugins", "data", "deepseek");
 }
 
-export function workspaceDir(workspaceRoot) {
+export function workspacePath(workspaceRoot) {
   const root = path.resolve(workspaceRoot);
   // Preserve distinct project identities outside Windows, while keeping the existing Windows hash and directory name.
   const identity = process.platform === "win32" ? root.toLowerCase() : root;
   const hash = crypto.createHash("sha1").update(identity).digest("hex").slice(0, 12);
-  const dir = path.join(dataRoot(), `${path.basename(root)}-${hash}`);
+  return path.join(dataRoot(), `${path.basename(root)}-${hash}`);
+}
+
+export function workspaceDir(workspaceRoot) {
+  const dir = workspacePath(workspaceRoot);
   fs.mkdirSync(path.join(dir, "jobs"), { recursive: true });
   return dir;
 }
