@@ -1,6 +1,6 @@
 # Codex 宿主调用
 
-本文件供 `setup` 与 `task` skills 共用。根据已加载的 `SKILL.md` 绝对路径，向上两级找到插件根目录，再定位 `scripts/deepseek-host.mjs`；路径不基于当前项目目录，也不依赖 shell 中存在 `PLUGIN_ROOT`。
+本文件供 Codex skills 共用。根据已加载的 `SKILL.md` 绝对路径，向上两级找到插件根目录，再定位 `scripts/deepseek-host.mjs`；路径不基于当前项目目录，也不依赖 shell 中存在 `PLUGIN_ROOT`。
 
 ## 以数据文件传递请求
 

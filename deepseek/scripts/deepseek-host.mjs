@@ -7,6 +7,12 @@ import { runSession } from "./deepseek-session.mjs";
 
 async function main() {
   const [host, ...raw] = process.argv.slice(2);
+  if (raw[0] === "session") {
+    if (!["claude", "codex"].includes(host)) throw new Error("无效的宿主种类。");
+    process.env.DEEPSEEK_DATA_DIR = sharedDataRoot();
+    await runSession(raw.slice(1), { host });
+    return;
+  }
   const argv = splitRawArgs(raw);
   const identity = {};
   while (["--session-id", "--transcript-source"].includes(argv[0])) {
@@ -22,12 +28,6 @@ async function main() {
     ...identity,
   } : identity);
   process.env.DEEPSEEK_DATA_DIR = sharedDataRoot();
-  if (argv[0] === "session") {
-    if (host !== "claude") throw new Error("当前会话钩子只接受 Claude 宿主。");
-    try { await runSession(argv.slice(1)); }
-    catch { throw new Error("Claude 会话钩子失败，未完成登记或清理。"); }
-    return;
-  }
   if (argv[0] !== "setup") {
     await prepareSharedProject(process.env.DEEPSEEK_DATA_DIR, context.workspaceRoot);
   }

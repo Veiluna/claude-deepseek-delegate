@@ -10,7 +10,7 @@ import { tmpDir, setup } from "./helpers.mjs";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
-test("marketplace installation publishes only the complete deepseek 0.3.1 plugin", (t) => {
+test("marketplace installation publishes only the complete deepseek 0.3.2 plugin", (t) => {
   const marketplace = readJson(path.join(root, ".claude-plugin", "marketplace.json"));
   const installed = tmpDir("ds-release-");
   t.after(() => fs.rmSync(installed, { recursive: true, force: true }));
@@ -24,7 +24,7 @@ test("marketplace installation publishes only the complete deepseek 0.3.1 plugin
   const plugin = path.join(installed, "deepseek");
   const manifest = readJson(path.join(plugin, ".claude-plugin", "plugin.json"));
   assert.equal(manifest.name, "deepseek");
-  assert.equal(manifest.version, "0.3.1");
+  assert.equal(manifest.version, "0.3.2");
   assert.deepEqual(fs.readdirSync(path.join(plugin, "commands")).sort(), [
     "adversarial-review.md", "cancel.md", "result.md", "review.md",
     "setup.md", "status.md", "task.md", "transfer.md",
@@ -44,7 +44,7 @@ test("marketplace installation publishes only the complete deepseek 0.3.1 plugin
   }
 });
 
-test("Codex marketplace 安装包发现 task/setup 且从包内运行共享环境检查", (t) => {
+test("Codex marketplace 安装包发现任务与作业 skills、真实生命周期钩子且从包内运行共享环境检查", (t) => {
   const marketplace = readJson(path.join(root, ".agents", "plugins", "marketplace.json"));
   assert.equal(marketplace.name, "deepseek-delegate");
   assert.equal(marketplace.plugins.length, 1);
@@ -61,16 +61,21 @@ test("Codex marketplace 安装包发现 task/setup 且从包内运行共享环�
   fs.cpSync(path.resolve(root, entry.source.path), plugin, { recursive: true });
   const manifest = readJson(path.join(plugin, ".codex-plugin", "plugin.json"));
   assert.equal(manifest.name, "deepseek");
-  assert.equal(manifest.version, "0.3.1");
+  assert.equal(manifest.version, "0.3.2");
   assert.equal(manifest.version, readJson(path.join(plugin, ".claude-plugin", "plugin.json")).version);
   assert.equal(manifest.skills, "./codex-skills/");
-  assert.deepEqual(fs.readdirSync(path.join(plugin, manifest.skills)).sort(), ["setup", "task"]);
-  for (const name of ["setup", "task"]) {
+  assert.deepEqual(fs.readdirSync(path.join(plugin, manifest.skills)).sort(), ["cancel", "result", "setup", "status", "task"]);
+  for (const name of ["setup", "task", "status", "result", "cancel"]) {
     const skill = fs.readFileSync(path.join(plugin, manifest.skills, name, "SKILL.md"), "utf8");
     assert.match(skill, new RegExp(`^---\\r?\\nname: ${name}\\r?\\n`));
   }
-  // 显式空配置替代默认发现，不能在 Codex 执行 Claude 生命周期脚本。
-  assert.deepEqual(readJson(path.join(plugin, manifest.hooks)), { hooks: {} });
+  const hooks = readJson(path.join(plugin, manifest.hooks)).hooks;
+  assert.deepEqual(Object.keys(hooks).sort(), ["SessionEnd", "SessionStart"]);
+  for (const event of Object.values(hooks)) assert.deepEqual(event, [{ hooks: [{ type: "command", command: 'node "${PLUGIN_ROOT}/scripts/deepseek-host.mjs" codex session' }] }]);
+  assert.ok(fs.statSync(path.join(plugin, "scripts/lib/host-owner.mjs")).isFile());
+  const task = fs.readFileSync(path.join(plugin, manifest.skills, "task/SKILL.md"), "utf8");
+  assert.match(task, /--background/);
+  assert.doesNotMatch(task, /尚未提供作业入口/);
   const r = spawnSync(process.execPath, [path.join(plugin, "scripts", "deepseek-host.mjs"),
     "codex", "--session-id", "installed-codex-session", "setup", "--json"], {
     cwd: installed, encoding: "utf8", env: {

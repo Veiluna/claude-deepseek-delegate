@@ -5,16 +5,28 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { workspaceDir, writeJsonAtomic } from "./state.mjs";
+import { workspaceDir, workspacePath, writeJsonAtomic } from "./state.mjs";
 import { killTree } from "./dsh.mjs";
 import { windowsProcessAlive, ProcessIdentityMismatchError } from "./windows-process.mjs";
 import { posixProcessIdentity, posixProcessAlive, OWNER_ENV } from "./posix-process.mjs";
 import { selfProcessInstance, processInstanceAlive } from "./process-instance.mjs";
+import { readHostOwner, publishOwnedJob, validateSnapshot } from "./host-owner.mjs";
 
 const worker = fileURLToPath(new URL("../deepseek-worker.mjs", import.meta.url));
 const active = (job) => ["queued", "running"].includes(job.status);
 const currentSessionId = () => process.env.CLAUDE_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null;
 const directory = (root) => path.join(workspaceDir(root), "jobs");
+export function belongsToHost(job, context) {
+  if (!["claude", "codex"].includes(context?.host) || typeof context.sessionId !== "string" || !context.sessionId.trim()) return false;
+  const legacy = !Object.hasOwn(job, "host") && !Object.hasOwn(job, "sessionId");
+  return legacy ? context.host === "claude" && job.claudeSessionId === context.sessionId
+    : job.host === context.host && job.sessionId === context.sessionId;
+}
+
+function assertOwned(job, context) {
+  if (context !== undefined && !belongsToHost(job, context)) throw new Error("当前宿主会话没有该作业的归属。");
+  return job;
+}
 function jobFile(root, id, suffix = ".json") {
   if (!/^[\w-]+$/.test(id ?? "")) throw new Error("无效的作业编号。");
   return path.join(directory(root), id + suffix);
@@ -160,13 +172,14 @@ async function recover(root, job) {
   return job;
 }
 
-export async function startJob(root, options) {
+export async function startJob(root, options, { hostContext } = {}) {
+  if (hostContext !== undefined) readHostOwner(hostContext);
   return withJobsLock(root, async () => {
     const id = crypto.randomUUID();
     const job = {
       id, kind: options.kind || "task", status: "queued", pid: null, dshPid: null,
       createdAt: new Date().toISOString(), startedAt: null, finishedAt: null,
-      claudeSessionId: currentSessionId(), workspaceRoot: root,
+      ...(hostContext === undefined ? { claudeSessionId: currentSessionId() } : { host: hostContext.host, sessionId: hostContext.sessionId }), workspaceRoot: root,
       logPath: jobFile(root, id, ".log"),
       workerIdentity: process.platform === "win32" ? { script: worker, token: id } : null,
     };
@@ -177,8 +190,13 @@ export async function startJob(root, options) {
       if (active(oldest)) stopJob(oldest, { recovering: true });
       for (const suffix of [".log", ".request.json", ".json"]) fs.rmSync(jobFile(root, oldest.id, suffix), { force: true });
     }
-    fs.writeFileSync(job.logPath, "");
-    await saveJob(root, job);
+    const publish = async (ownerSequence) => {
+      if (ownerSequence !== undefined) job.ownerSequence = ownerSequence;
+      fs.writeFileSync(job.logPath, "");
+      await saveJob(root, job);
+    };
+    if (hostContext === undefined) await publish();
+    else await publishOwnedJob(hostContext, root, publish);
     await writeJsonAtomic(jobFile(root, id, ".request.json"), options);
     const fd = fs.openSync(job.logPath, "a");
     let child;
@@ -223,16 +241,16 @@ function progress(job) {
   } finally { fs.closeSync(fd); }
 }
 
-async function statuses(root, id, { wait = false, timeoutMs, claudeSessionId = currentSessionId(), all = false } = {}, list = false) {
+async function statuses(root, id, { wait = false, timeoutMs, claudeSessionId = currentSessionId(), all = false, hostContext } = {}, list = false) {
   const deadline = timeoutMs === undefined ? Infinity : Date.now() + timeoutMs;
   let ids;
   for (;;) {
     const jobs = await withJobsLock(root, async () => {
       let selected = ids ? ids.map((key) => readJob(root, key)) : id ? [readJob(root, id)] : allJobs(root);
-      if (!all) selected = selected.filter((job) => (job.claudeSessionId ?? null) === claudeSessionId);
+      if (!all) selected = selected.filter((job) => hostContext !== undefined ? belongsToHost(job, hostContext) : (job.claudeSessionId ?? null) === claudeSessionId);
       if (!list) {
         selected = selected.slice(-1);
-        if (!selected.length) throw new Error("当前 Claude 会话没有该作业，可用 --all 查看项目作业。");
+        if (!selected.length) throw new Error(hostContext === undefined ? "当前 Claude 会话没有该作业，可用 --all 查看项目作业。" : "当前所属会话没有该作业，可用 --all 查看项目作业。");
       }
       ids ??= selected.map((job) => job.id);
       for (const job of selected) await recover(root, job);
@@ -270,6 +288,27 @@ export async function cleanSessionJobs(root, claudeSessionId, { before = Date.no
     }
   }
   const belongs = (job) => job.claudeSessionId === claudeSessionId && Date.parse(job.createdAt) <= before;
+  return cleanJobs(roots, belongs, "Claude 会话");
+}
+
+export async function cleanHostSessionJobs(snapshot, { before } = {}) {
+  validateSnapshot(snapshot);
+  if (!Number.isFinite(before)) throw new Error("无效的清理时刻。");
+  const belongs = (job) => {
+    if (!belongsToHost(job, snapshot)) return false;
+    if (Object.hasOwn(job, "ownerSequence")) {
+      if (!Number.isSafeInteger(job.ownerSequence) || job.ownerSequence <= 0) throw new Error("作业所属序号损坏，未降级为时间清理。");
+      return job.ownerSequence <= snapshot.fence;
+    }
+    if (Object.hasOwn(job, "host") || Object.hasOwn(job, "sessionId")) throw new Error("新宿主作业所属序号缺失，未降级为时间清理。");
+    // 只有旧版未写入序号的记录采用时间兼容。
+    return Date.parse(job.createdAt) <= before;
+  };
+  const roots = new Set(snapshot.roots.filter(root => fs.existsSync(path.join(workspacePath(root), "jobs"))));
+  return cleanJobs(roots, belongs, "宿主会话");
+}
+
+async function cleanJobs(roots, belongs, label) {
   let failed = false;
   for (const projectRoot of roots) {
     const ids = await withJobsLock(projectRoot, () => allJobs(projectRoot).filter(belongs).map((job) => job.id));
@@ -293,7 +332,7 @@ export async function cleanSessionJobs(root, claudeSessionId, { before = Date.no
         await withJobsLock(projectRoot, async () => {
           if (!fs.existsSync(jobFile(projectRoot, id))) return;
           const current = readJob(projectRoot, id);
-          current.error = `Claude 会话结束时清理失败：${err.message}`;
+          current.error = `${label}结束时清理失败：${err.message}`;
           await saveJob(projectRoot, current);
         });
         continue;
@@ -307,20 +346,21 @@ export async function cleanSessionJobs(root, claudeSessionId, { before = Date.no
   if (failed) throw new Error("部分作业清理失败，已保留记录与取消意图供恢复。");
 }
 
-export async function jobResult(root, id) {
+export async function jobResult(root, id, { hostContext } = {}) {
   return withJobsLock(root, async () => {
-    const job = id ? await recover(root, readJob(root, id)) : allJobs(root)
-      .filter((j) => j.status === "completed").sort((a, b) => a.finishedAt.localeCompare(b.finishedAt)).at(-1);
+    const job = id ? await recover(root, assertOwned(readJob(root, id), hostContext)) : allJobs(root)
+      .filter((j) => j.status === "completed" && (hostContext === undefined || belongsToHost(j, hostContext)))
+      .sort((a, b) => a.finishedAt.localeCompare(b.finishedAt)).at(-1);
     if (!job) throw new Error("当前项目没有已完成的作业。");
     if (active(job)) throw new Error(`作业尚未结束：${job.id}（${job.status}）`);
     return { id: job.id, kind: job.kind, status: job.status, ...(job.result || { ok: false, final: null, error: job.error || "作业已取消。" }) };
   });
 }
 
-export async function cancelJob(root, id) {
+export async function cancelJob(root, id, { hostContext } = {}) {
   if (!id) throw new Error("cancel 必须提供作业编号。");
   return withJobsLock(root, async () => {
-    const job = await recover(root, readJob(root, id));
+    const job = await recover(root, assertOwned(readJob(root, id), hostContext));
     if (active(job)) {
       job.cancelRequestedAt = new Date().toISOString();
       await saveJob(root, job);
