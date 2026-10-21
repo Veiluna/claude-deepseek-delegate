@@ -5,7 +5,7 @@ Claude Code plugin marketplace hosting the `deepseek` plugin, which lets Claude 
 ## 仓库结构
 
 - `deepseek/`：新插件，经本机 `dsh --profile headless --json` 运行 DeepSeek（ADR-0004）。新功能都做在这里。
-- `deepseek-delegate/`：旧插件，将被 `deepseek` 取代，只修阻断性问题，不再加功能。
+- 旧的 `deepseek-delegate` 插件已移除；安装与迁移说明见 `README.md`。
 - 测试：在 `deepseek/` 下运行 `npm test`（`node --test`，用 `tests/fake-dsh.mjs` 代替真实 dsh，不联网、不需要登录）。
 
 ## 协作分工

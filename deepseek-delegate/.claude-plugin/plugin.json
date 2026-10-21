@@ -1,6 +1,0 @@
-{
-  "name": "deepseek-delegate",
-  "version": "0.1.0",
-  "description": "把边界清晰的写代码任务自动分派给 DeepSeek（deepseek-flash）执行",
-  "author": { "name": "Veiluna" }
-}
