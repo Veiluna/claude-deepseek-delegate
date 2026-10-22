@@ -1,8 +1,8 @@
 # deepseek
 
-Claude Code 与 Codex 插件：通过本机 DeepSeek Harness 的 `dsh` 调用 DeepSeek。Claude Code 支持前台任务、后台作业、续接 DeepSeek 线程、只读审阅，以及把当前 Claude 会话整理成交接说明后转交；Codex 当前提供环境检查、前台任务、后台作业与跨宿主续接。
+Claude Code 与 Codex 插件：通过本机 DeepSeek Harness 的 `dsh` 调用 DeepSeek。两种宿主均支持环境检查、前台任务、后台作业、跨宿主续接 DeepSeek 线程、只读审阅及对抗式审阅；Claude Code 还支持把当前 Claude 会话整理成交接说明后转交。
 
-插件提供调用接口，调用时机由宿主与用户决定。版本为 `0.3.2`；marketplace 名仍为 `deepseek-delegate`，插件名为 `deepseek`。
+插件提供调用接口，调用时机由宿主与用户决定。版本为 `0.3.3`；marketplace 名仍为 `deepseek-delegate`，插件名为 `deepseek`。
 
 ## 前置条件
 
@@ -54,7 +54,17 @@ $deepseek:task --fresh -- 为日期转换函数补充边界测试并实现修复
 $deepseek:task --resume --read-only -- 解释上次修改涉及的调用关系
 ```
 
-Codex skills 保持按能力可发现，不附带分派策略。task 支持 `--background`、`--resume`、`--fresh`、`--read-only`、`--cwd`、`--model`、`--effort` 及 `--json`，续接选择规则与 Claude 相同。正文以 stdin 数据传递，保留原文及换行；有候选时询问一次，确认后候选变化则停止，不自动重试。后台返回编号后可用 `$deepseek:status`、`$deepseek:result`、`$deepseek:cancel` 管理作业；默认只作用当前宿主会话，`status --all` 显式查看项目全部。Codex 审阅与转交 skills 尚未提供。
+任务、环境检查与作业 skills 保持按能力可发现，不附带分派策略。task 支持 `--background`、`--resume`、`--fresh`、`--read-only`、`--cwd`、`--model`、`--effort` 及 `--json`，续接选择规则与 Claude 相同。正文以 stdin 数据传递，保留原文及换行；有候选时询问一次，确认后候选变化则停止，不自动重试。后台返回编号后可用 `$deepseek:status`、`$deepseek:result`、`$deepseek:cancel` 管理作业；默认只作用当前宿主会话，`status --all` 显式查看项目全部。Codex 转交 skill 尚未提供。
+
+审阅 skills 仅供用户显式调用，使用 `policy.allow_implicit_invocation: false`，插件命名空间自动生成 `deepseek:review` 与 `deepseek:adversarial-review`：
+
+```text
+$deepseek:review --scope working-tree
+$deepseek:review --base main --background --json
+$deepseek:adversarial-review --scope branch -- 重点检查恢复流程的假设
+```
+
+两种审阅支持 `--scope`、`--base`、`--model`、`--effort`、`--background`、`--cwd`、`--json`，与 Claude 使用同一范围采集、schema、作业及结果核心。先预检未跟踪文件在内的规模，空范围直接结束，未明确执行方式时按建议询问一次前台或后台。对抗式关注点用 stdin 保留原文。审阅始终只读，不自动修复，不改变可续接线程；失败时展示核心给出的错误与保留结果，不将截断进度当 `final`。
 
 安装时遵循 Codex 的正常确认与信任提示，在 `/hooks` 中审阅并启用插件的 SessionStart、SessionEnd 钩子。后台作业需要有效的主线程 SessionStart 登记；未登记或未知身份可执行前台任务。真正结束宿主会话时分离清理所属作业，切换聊天和回合结束不清理，恢复后新作业受固定序号围栏保护。插件不会自动批准 dsh 的授权请求。当前变更已用合成钩子和假 dsh 离线验证，桌面端及 CLI 的正常安装与信任流程仍需分别实机验收。
 
@@ -177,7 +187,7 @@ claude plugin validate ./.claude-plugin/marketplace.json
 
 在 `deepseek/` 下运行 `npm test`。测试使用 fake dsh，不调用真实 dsh、不联网、不需要 Harness 登录。
 
-外部 CLI 接口 `node deepseek/scripts/deepseek-host.mjs codex [--session-id <真实编号>] task --fresh --prompt-stdin` 从 stdin 读取正文；身份参数放在命令前，缺失时保持未知。`--prompt-stdin` 与位置正文互斥，空白正文报错；不使用该选项的旧 CLI 参数语义保持兼容。skills 用固定 Node 启动代码从临时 JSON 请求文件构造参数数组，将正文放进子进程 stdin，不拼接到 shell。安装包测试会从原生 marketplace 复制完整目录并调用包内入口检查环境。
+外部 CLI 接口 `node deepseek/scripts/deepseek-host.mjs codex [--session-id <真实编号>] task --fresh --prompt-stdin` 从 stdin 读取正文；`review-context --prompt-stdin` 与 `adversarial-review --prompt-stdin` 使用同一读取方式接收关注点，普通 `review` 拒绝附加关注点。身份参数放在命令前，缺失时保持未知。`--prompt-stdin` 与位置正文互斥，空白正文报错；不使用该选项的旧 CLI 参数语义保持兼容。skills 用固定 Node 启动代码从临时 JSON 请求文件构造参数数组，将正文放进子进程 stdin，不拼接到 shell。安装包测试会从原生 marketplace 复制完整目录并调用包内入口检查环境。
 
 ## 许可
 

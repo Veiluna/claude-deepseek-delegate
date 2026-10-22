@@ -42,7 +42,7 @@ export function splitRawArgs(argv) {
   return out;
 }
 
-// stdin 是任务原文数据，不参与选项拆分，也不删除首尾空白。
+// stdin 是正文原文数据，不参与选项拆分，也不删除首尾空白。
 export function readPrompt({ flags, positional, text }) {
   if (!("prompt-stdin" in flags)) return text;
   if (flags["prompt-stdin"] !== true) throw new Error("--prompt-stdin 不接受参数值。");
