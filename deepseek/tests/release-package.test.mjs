@@ -10,7 +10,7 @@ import { tmpDir, setup } from "./helpers.mjs";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
-test("marketplace installation publishes only the complete deepseek 0.3.4 plugin", (t) => {
+test("marketplace installation publishes only the complete deepseek 0.3.5 plugin", (t) => {
   const marketplace = readJson(path.join(root, ".claude-plugin", "marketplace.json"));
   const installed = tmpDir("ds-release-");
   t.after(() => fs.rmSync(installed, { recursive: true, force: true }));
@@ -24,7 +24,7 @@ test("marketplace installation publishes only the complete deepseek 0.3.4 plugin
   const plugin = path.join(installed, "deepseek");
   const manifest = readJson(path.join(plugin, ".claude-plugin", "plugin.json"));
   assert.equal(manifest.name, "deepseek");
-  assert.equal(manifest.version, "0.3.4");
+  assert.equal(manifest.version, "0.3.5");
   assert.deepEqual(fs.readdirSync(path.join(plugin, "commands")).sort(), [
     "adversarial-review.md", "cancel.md", "result.md", "review.md",
     "setup.md", "status.md", "task.md", "transfer.md",
@@ -62,7 +62,7 @@ test("Codex marketplace 安装包发现任务、作业、显式审阅与转交 s
   fs.cpSync(path.resolve(root, entry.source.path), plugin, { recursive: true });
   const manifest = readJson(path.join(plugin, ".codex-plugin", "plugin.json"));
   assert.equal(manifest.name, "deepseek");
-  assert.equal(manifest.version, "0.3.4");
+  assert.equal(manifest.version, "0.3.5");
   assert.equal(manifest.version, readJson(path.join(plugin, ".claude-plugin", "plugin.json")).version);
   assert.equal(manifest.skills, "./codex-skills/");
   assert.deepEqual(fs.readdirSync(path.join(plugin, manifest.skills)).sort(), ["adversarial-review", "cancel", "result", "review", "setup", "status", "task", "transfer"]);
