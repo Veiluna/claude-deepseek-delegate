@@ -10,7 +10,7 @@ import { tmpDir, setup } from "./helpers.mjs";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
-test("marketplace installation publishes only the complete deepseek 0.3.2 plugin", (t) => {
+test("marketplace installation publishes only the complete deepseek 0.3.3 plugin", (t) => {
   const marketplace = readJson(path.join(root, ".claude-plugin", "marketplace.json"));
   const installed = tmpDir("ds-release-");
   t.after(() => fs.rmSync(installed, { recursive: true, force: true }));
@@ -24,7 +24,7 @@ test("marketplace installation publishes only the complete deepseek 0.3.2 plugin
   const plugin = path.join(installed, "deepseek");
   const manifest = readJson(path.join(plugin, ".claude-plugin", "plugin.json"));
   assert.equal(manifest.name, "deepseek");
-  assert.equal(manifest.version, "0.3.2");
+  assert.equal(manifest.version, "0.3.3");
   assert.deepEqual(fs.readdirSync(path.join(plugin, "commands")).sort(), [
     "adversarial-review.md", "cancel.md", "result.md", "review.md",
     "setup.md", "status.md", "task.md", "transfer.md",
@@ -44,7 +44,7 @@ test("marketplace installation publishes only the complete deepseek 0.3.2 plugin
   }
 });
 
-test("Codex marketplace 安装包发现任务与作业 skills、真实生命周期钩子且从包内运行共享环境检查", (t) => {
+test("Codex marketplace 安装包发现任务、作业及显式审阅 skills、真实生命周期钩子且从包内运行共享环境检查", (t) => {
   const marketplace = readJson(path.join(root, ".agents", "plugins", "marketplace.json"));
   assert.equal(marketplace.name, "deepseek-delegate");
   assert.equal(marketplace.plugins.length, 1);
@@ -61,13 +61,28 @@ test("Codex marketplace 安装包发现任务与作业 skills、真实生命周�
   fs.cpSync(path.resolve(root, entry.source.path), plugin, { recursive: true });
   const manifest = readJson(path.join(plugin, ".codex-plugin", "plugin.json"));
   assert.equal(manifest.name, "deepseek");
-  assert.equal(manifest.version, "0.3.2");
+  assert.equal(manifest.version, "0.3.3");
   assert.equal(manifest.version, readJson(path.join(plugin, ".claude-plugin", "plugin.json")).version);
   assert.equal(manifest.skills, "./codex-skills/");
-  assert.deepEqual(fs.readdirSync(path.join(plugin, manifest.skills)).sort(), ["cancel", "result", "setup", "status", "task"]);
-  for (const name of ["setup", "task", "status", "result", "cancel"]) {
+  assert.deepEqual(fs.readdirSync(path.join(plugin, manifest.skills)).sort(), ["adversarial-review", "cancel", "result", "review", "setup", "status", "task"]);
+  for (const name of ["setup", "task", "status", "result", "cancel", "review", "adversarial-review"]) {
     const skill = fs.readFileSync(path.join(plugin, manifest.skills, name, "SKILL.md"), "utf8");
     assert.match(skill, new RegExp(`^---\\r?\\nname: ${name}\\r?\\n`));
+  }
+  for (const name of ["review", "adversarial-review"]) {
+    const policy = fs.readFileSync(path.join(plugin, manifest.skills, name, "agents/openai.yaml"), "utf8");
+    assert.match(policy, /^policy:\r?\n  allow_implicit_invocation: false\s*$/);
+    const skill = fs.readFileSync(path.join(plugin, manifest.skills, name, "SKILL.md"), "utf8");
+    assert.match(skill, /用户显式调用/);
+    assert.match(skill, /review-context/);
+    for (const reference of ["codex-cli.md", "codex-review.md"]) assert.ok(skill.includes(`../../references/${reference}`));
+    const workflow = fs.readFileSync(path.join(plugin, "references/codex-review.md"), "utf8");
+    for (const flag of ["--base", "--scope", "--model", "--effort", "--background", "--cwd", "--json"]) assert.ok(workflow.includes(flag), `${name} 缺少 ${flag}`);
+    assert.match(workflow, /一次/);
+    assert.match(workflow, /64 KiB/);
+    assert.match(workflow, /未跟踪/);
+    assert.match(workflow, /没有可审阅的变更/);
+    assert.match(workflow, /final/);
   }
   const hooks = readJson(path.join(plugin, manifest.hooks)).hooks;
   assert.deepEqual(Object.keys(hooks).sort(), ["SessionEnd", "SessionStart"]);

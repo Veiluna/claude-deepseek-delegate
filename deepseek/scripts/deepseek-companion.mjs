@@ -227,7 +227,11 @@ async function cmdJob(command, argv, hostContext) {
 }
 
 async function cmdReview(argv, kind, hostContext) {
-  const { flags, text } = parseArgs(argv, ["cwd", "scope", "base", "model", "effort"]);
+  const parsed = parseArgs(argv, ["cwd", "scope", "base", "model", "effort"]);
+  const { flags } = parsed;
+  let text;
+  try { text = readPrompt(parsed); }
+  catch (err) { fail(err.message, 2); }
   validateOverrides(flags);
   for (const name of ["cwd", "scope", "base"]) {
     if (name in flags && (typeof flags[name] !== "string" || !flags[name].trim() || flags[name].startsWith("--"))) {

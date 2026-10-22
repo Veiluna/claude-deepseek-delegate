@@ -1,6 +1,6 @@
 {
   "name": "deepseek",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "在 Claude Code 里调用本机 DeepSeek Harness（dsh）完成任务",
   "author": { "name": "Veiluna" }
 }
