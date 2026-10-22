@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createInterface } from "node:readline";
 import { runDsh } from "./dsh.mjs";
+import { transcriptRecords } from "./transcript-records.mjs";
 
 export function resolveTranscript(cwd, source = process.env.CLAUDE_TRANSCRIPT_PATH) {
   if (typeof source !== "string" || !source.trim()) throw new Error("未登记 Claude 会话记录，请指定 --source <.jsonl 路径>。");
@@ -74,48 +74,41 @@ function toolSummary(part) {
   return `- 工具 ${redact(name)}：${action || "调用"}${file ? ` ${file}` : ""}（结果未核实；参数正文和输出已省略）`;
 }
 
-export async function buildHandoff(source, maxChars = 12000) {
+async function* claudeMessages(source) {
+  for await (const record of transcriptRecords(source, "Claude")) {
+    if (!record || typeof record !== "object" || record.isMeta) continue;
+    const role = record.message?.role ?? record.type ?? record.role;
+    if (!["user", "assistant"].includes(role) || !["user", "assistant"].includes(record.type ?? record.role)) continue;
+    const content = record.message?.content;
+    const texts = typeof content === "string" ? [content] : Array.isArray(content) ? content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text) : [];
+    yield { role, text: texts.join("\n"), tools: Array.isArray(content) ? content.filter(part => part?.type === "tool_use") : [] };
+  }
+}
+
+export async function buildHandoff(source, maxChars = 12000, { messages = claudeMessages(source), speaker = "Claude" } = {}) {
   let entries = [];
-  const input = fs.createReadStream(source, { encoding: "utf8" });
-  const lines = createInterface({ input, crlfDelay: Infinity });
-  let readError;
-  input.on("error", (error) => { readError = error; lines.close(); });
-  try {
-    for await (const line of lines) {
-      if (!line.trim()) continue;
-      let record;
-      try { record = JSON.parse(line); }
-      catch { throw new Error("Claude 会话记录存在无效 JSON，未转交任何内容。"); }
-      if (!record || typeof record !== "object" || record.isMeta) continue;
-      const role = record.message?.role ?? record.type ?? record.role;
-      if (!["user", "assistant"].includes(role) || !["user", "assistant"].includes(record.type ?? record.role)) continue;
-      const content = record.message?.content;
-      const texts = typeof content === "string" ? [content] : Array.isArray(content) ? content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text) : [];
-      if (Array.isArray(content)) for (const part of content) {
-        if (part?.type === "tool_use") entries.push({ section: 2, tool: true, text: toolSummary(part) });
-      }
-      let section = 0;
-      for (const paragraph of cleanText(texts.join("\n")).split(/\r?\n/).map((part) => part.trim()).filter(Boolean)) {
-          const heading = paragraph.replace(/^#+\s*/, "");
-          const found = categories.findIndex((pattern) => pattern.test(heading));
-          if (found >= 0) section = found;
-          const speaker = role === "user" ? "用户" : "Claude";
-          entries.push({ section, tool: false, text: `- ${speaker}：${paragraph}` });
-          if (section === 0) {
-            // 保留完整文字往来，再把明确的约束、验收与输出要求归入对应部分。
-            for (const sentence of paragraph.split(/[。！？；]|\.(?=\s)/).filter((part) => part.trim())) {
-              for (const [target, pattern] of [
-                [1, /不要|禁止|不允许|必须|不能|决定|采用|约束|保持|\b(?:must|never|decided|constraints?)\b|do not/i],
-                [3, /验收|npm test|测试.*通过|\bacceptance\b|tests? (?:must )?pass/i],
-                [4, /输出|汇报|总结|最终回复|\b(?:output|report|respond)\b/i],
-              ]) if (pattern.test(sentence)) entries.push({ section: target, tool: false, text: `- ${speaker}：${sentence.trim()}` });
-            }
-          }
+  for await (const message of messages) {
+    for (const part of message.tools || []) entries.push({ section: 2, tool: true, text: toolSummary(part) });
+    let section = 0;
+    for (const paragraph of cleanText(message.text || "").split(/\r?\n/).map((part) => part.trim()).filter(Boolean)) {
+      const heading = paragraph.replace(/^#+\s*/, "");
+      const found = categories.findIndex((pattern) => pattern.test(heading));
+      if (found >= 0) section = found;
+      const author = message.role === "user" ? "用户" : speaker;
+      entries.push({ section, tool: false, text: `- ${author}：${paragraph}` });
+      if (section === 0) {
+        // 保留文字往来，再把明确的约束、验收与输出要求归入对应部分。
+        for (const sentence of paragraph.split(/[。！？；]|\.(?=\s)/).filter((part) => part.trim())) {
+          for (const [target, pattern] of [
+            [1, /不要|禁止|不允许|必须|不能|决定|采用|约束|保持|\b(?:must|never|decided|constraints?)\b|do not/i],
+            [3, /验收|npm test|测试.*通过|\bacceptance\b|tests? (?:must )?pass/i],
+            [4, /输出|汇报|总结|最终回复|\b(?:output|report|respond)\b/i],
+          ]) if (pattern.test(sentence)) entries.push({ section: target, tool: false, text: `- ${author}：${sentence.trim()}` });
+        }
       }
     }
-    if (readError) throw new Error("Claude 会话记录读取失败，未转交任何内容。");
-  } finally { lines.close(); input.destroy(); }
-  if (!entries.some((entry) => !entry.tool)) throw new Error("Claude 会话记录没有可转交的文字往来。");
+  }
+  if (!entries.some((entry) => !entry.tool)) throw new Error(`${speaker} 会话记录没有可转交的文字往来。`);
   const render = () => "# 交接说明\n\n" + titles.map((title, index) => `## ${title}\n${entries.filter((entry) => entry.section === index).map((entry) => entry.text).join("\n") || "原记录未明确，请继续前确认。"}`).join("\n\n") +
     "\n\n本次仅转交：请简短确认收到，等待用户继续，不读取或修改文件，不自动执行任务。\n";
   let omittedTools = 0;
@@ -144,8 +137,8 @@ export async function buildHandoff(source, maxChars = 12000) {
   return { handoff: render(), omittedTools, compressedMessages };
 }
 
-export async function transferSession({ cwd, source, maxChars }) {
-  const payload = await buildHandoff(source, maxChars);
+export async function transferSession({ cwd, source, maxChars, messages, speaker }) {
+  const payload = await buildHandoff(source, maxChars, { messages, speaker });
   const { handoff } = payload;
   const result = await runDsh({ cwd, prompt: handoff, permissionMode: "read-only" });
   if (!result.ok || typeof result.threadId !== "string" || !/^[\w][\w.:-]*$/.test(result.threadId)) {

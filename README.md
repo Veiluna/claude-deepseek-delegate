@@ -1,8 +1,8 @@
 # deepseek
 
-Claude Code 与 Codex 插件：通过本机 DeepSeek Harness 的 `dsh` 调用 DeepSeek。两种宿主均支持环境检查、前台任务、后台作业、跨宿主续接 DeepSeek 线程、只读审阅及对抗式审阅；Claude Code 还支持把当前 Claude 会话整理成交接说明后转交。
+Claude Code 与 Codex 插件：通过本机 DeepSeek Harness 的 `dsh` 调用 DeepSeek。两种宿主均支持环境检查、前台任务、后台作业、跨宿主续接 DeepSeek 线程、只读审阅、对抗式审阅及宿主会话转交。
 
-插件提供调用接口，调用时机由宿主与用户决定。版本为 `0.3.3`；marketplace 名仍为 `deepseek-delegate`，插件名为 `deepseek`。
+插件提供调用接口，调用时机由宿主与用户决定。版本为 `0.3.4`；marketplace 名仍为 `deepseek-delegate`，插件名为 `deepseek`。
 
 ## 前置条件
 
@@ -54,7 +54,7 @@ $deepseek:task --fresh -- 为日期转换函数补充边界测试并实现修复
 $deepseek:task --resume --read-only -- 解释上次修改涉及的调用关系
 ```
 
-任务、环境检查与作业 skills 保持按能力可发现，不附带分派策略。task 支持 `--background`、`--resume`、`--fresh`、`--read-only`、`--cwd`、`--model`、`--effort` 及 `--json`，续接选择规则与 Claude 相同。正文以 stdin 数据传递，保留原文及换行；有候选时询问一次，确认后候选变化则停止，不自动重试。后台返回编号后可用 `$deepseek:status`、`$deepseek:result`、`$deepseek:cancel` 管理作业；默认只作用当前宿主会话，`status --all` 显式查看项目全部。Codex 转交 skill 尚未提供。
+任务、环境检查与作业 skills 保持按能力可发现，不附带分派策略。task 支持 `--background`、`--resume`、`--fresh`、`--read-only`、`--cwd`、`--model`、`--effort` 及 `--json`，续接选择规则与 Claude 相同。正文以 stdin 数据传递，保留原文及换行；有候选时询问一次，确认后候选变化则停止，不自动重试。后台返回编号后可用 `$deepseek:status`、`$deepseek:result`、`$deepseek:cancel` 管理作业；默认只作用当前宿主会话，`status --all` 显式查看项目全部。
 
 审阅 skills 仅供用户显式调用，使用 `policy.allow_implicit_invocation: false`，插件命名空间自动生成 `deepseek:review` 与 `deepseek:adversarial-review`：
 
@@ -69,6 +69,18 @@ $deepseek:adversarial-review --scope branch -- 重点检查恢复流程的假设
 安装时遵循 Codex 的正常确认与信任提示，在 `/hooks` 中审阅并启用插件的 SessionStart、SessionEnd 钩子。后台作业需要有效的主线程 SessionStart 登记；未登记或未知身份可执行前台任务。真正结束宿主会话时分离清理所属作业，切换聊天和回合结束不清理，恢复后新作业受固定序号围栏保护。插件不会自动批准 dsh 的授权请求。当前变更已用合成钩子和假 dsh 离线验证，桌面端及 CLI 的正常安装与信任流程仍需分别实机验收。
 
 本票验证为离线安装包复制及 fake-dsh CLI 测试；Windows 11 桌面端和 CLI 的真实安装、登录与权限验收另行执行。
+
+### Codex 会话转交
+
+用户显式调用 `$deepseek:transfer`，或用 `$deepseek:transfer --source "<记录.jsonl>" --max-chars 12000 --json` 选择来源。该 skill 使用 `policy.allow_implicit_invocation: false`，与 Claude 共用交接说明生成、隐私过滤和长度预算。只读新开 DeepSeek 线程，仅要求确认收到等待继续；原记录、宿主登记和项目可续接线程保持不变。
+
+来源优先级为命令的 `--source`、命令前的 `--transcript-source` 宿主上下文、SessionStart 真实登记。`--source` 可选择同项目另一合法主线程，无需当前编号；另外两种来源必须与明确传入的当前 `--session-id` 匹配，不用记录内容补齐未知身份。宿主上下文来源无需先登记；默认登记缺失或其来源为 null 时明确失败，不扫描其他记录。Codex 不使用继承的 Claude 来源变量。
+
+所有来源均限制在 `CODEX_HOME/sessions/`（默认 `~/.codex/sessions/`）内的普通 `.jsonl`，检查真实路径和 metadata 的项目根，拒绝目录、伪前缀、链接逃逸和跨项目。首条 `session_meta` 决定文件身份；旧记录缺少 `session_id` 时按官方兼容使用 `id`，存在时须与 `id` 相同，后续 fork 历史 metadata 不重定义身份。
+
+首版以 [Codex 0.162.1 官方记录格式](https://github.com/openai/codex/tree/7a078f6bb4ce0dc2a81408b334ce52979d92c603/codex-rs/history/src) 为据，只支持主线程的 `cli`、`vscode`、`exec`、`mcp` 来源；custom、internal、subagent、缺失或未知来源均失败。仅纳入 `response_item` 用户 `input_text` 与助手明确 `phase: final_answer` 的 `output_text`；缺失及其他 phase 的助手文字省略，`event_msg` 不重复消费。event-only、未知消息格式和损坏 JSON 均停止，不回显原记录。分析、文件全文、工具正文和常见凭据过滤，工具仅留结果未核实的有限概况。默认预算为 12000 个 UTF-16 单元，`--max-chars` 可设为 512 到 64000；缺失信息保持未知。
+
+成功后按输出的真实项目根、线程 ID 与 Harness/tui 指引继续。`tui` 需要已有对应 profile；插件不会自动安装它，也不会自动登记 Harness 工作区。上述验证为合成脱敏 JSONL 和 fake dsh 的离线测试，真实客户端验收另行执行。
 
 ## 共享数据与从 0.2.0 迁移
 
@@ -152,7 +164,7 @@ claude plugin install deepseek@deepseek-delegate --scope user
 
 审阅先预检范围与规模，小规模建议前台，较大或规模未知时建议后台；未明确选择时询问一次。`--scope auto` 有本地变更时检查暂存、未暂存及未跟踪内容，工作树干净时检查分支。`--scope working-tree` 固定本地范围；`--scope branch` 固定提交范围。`--base` 使用与指定引用的共同祖先，不包含本地未提交内容，不能与 `--scope working-tree` 同用。自动基准依次查找 `origin/HEAD`、`main`、`master`、`trunk`；找不到时停止，不自动 fetch。审阅不自动修复。
 
-转交只接受 Claude 配置目录 `projects/` 下当前登记或通过 `--source` 指定的普通 `.jsonl` 记录。交接说明包含目标、已定决策与约束、涉及文件、验收标准和输出要求；过滤工具正文、文件全文和常见凭据格式，不发送完整记录。缺失的信息保持未知。它以只读方式新开 DeepSeek 线程，仅确认收到并等待用户继续，不自动执行交接任务；原 Claude 会话保持不变。
+Claude 转交只接受 Claude 配置目录 `projects/` 下当前登记或通过 `--source` 指定的普通 `.jsonl` 记录；Codex 的范围见上文。交接说明包含目标、已定决策与约束、涉及文件、验收标准和输出要求；过滤工具正文、文件全文和常见凭据格式，不发送完整记录。缺失的信息保持未知。它以只读方式新开 DeepSeek 线程，仅确认收到并等待用户继续，不自动执行交接任务；原宿主会话保持不变。
 
 成功转交后按输出给出的线程 ID 与打开方式继续。终端续接使用 `dsh tui --resume <线程ID>`，需要本机存在对应 `tui` profile。Harness 仅在已登记工作区显示线程；必要时先手动登记输出中的项目根目录。
 

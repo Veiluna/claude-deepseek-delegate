@@ -29,7 +29,7 @@ DeepSeek 一侧可被续接的一段连续对话。
 _Avoid_: DeepSeek 会话、session、对话
 
 **转交**：
-把一个 Claude 会话的要点整理成交接说明，在 dsh 中新开 DeepSeek 线程，由用户在 Harness 或终端继续；原 Claude 会话保持不变。
+把一个宿主会话的要点整理成交接说明，在 dsh 中新开 DeepSeek 线程，由用户在 Harness 或终端继续；原宿主会话保持不变。
 _Avoid_: 迁移、移交、会话镜像、transfer session
 
 **交接说明**：
