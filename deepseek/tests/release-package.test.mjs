@@ -10,7 +10,7 @@ import { tmpDir, setup } from "./helpers.mjs";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
-test("marketplace installation publishes only the complete deepseek 0.3.3 plugin", (t) => {
+test("marketplace installation publishes only the complete deepseek 0.3.4 plugin", (t) => {
   const marketplace = readJson(path.join(root, ".claude-plugin", "marketplace.json"));
   const installed = tmpDir("ds-release-");
   t.after(() => fs.rmSync(installed, { recursive: true, force: true }));
@@ -24,7 +24,7 @@ test("marketplace installation publishes only the complete deepseek 0.3.3 plugin
   const plugin = path.join(installed, "deepseek");
   const manifest = readJson(path.join(plugin, ".claude-plugin", "plugin.json"));
   assert.equal(manifest.name, "deepseek");
-  assert.equal(manifest.version, "0.3.3");
+  assert.equal(manifest.version, "0.3.4");
   assert.deepEqual(fs.readdirSync(path.join(plugin, "commands")).sort(), [
     "adversarial-review.md", "cancel.md", "result.md", "review.md",
     "setup.md", "status.md", "task.md", "transfer.md",
@@ -39,12 +39,13 @@ test("marketplace installation publishes only the complete deepseek 0.3.3 plugin
     "agents/deepseek-agent.md", "hooks/hooks.json", "scripts/deepseek-companion.mjs",
     "scripts/deepseek-session.mjs", "scripts/deepseek-worker.mjs", "scripts/lib/dsh.mjs",
     "scripts/deepseek-host.mjs", "scripts/lib/host-context.mjs", "scripts/lib/migration.mjs", "scripts/lib/shared-data.mjs",
+    "scripts/lib/codex-transcript.mjs", "scripts/lib/transcript-records.mjs",
   ]) {
     assert.ok(fs.statSync(path.join(plugin, file)).isFile(), `missing installed file: ${file}`);
   }
 });
 
-test("Codex marketplace 安装包发现任务、作业及显式审阅 skills、真实生命周期钩子且从包内运行共享环境检查", (t) => {
+test("Codex marketplace 安装包发现任务、作业、显式审阅与转交 skills、真实钩子且从包内运行核心", (t) => {
   const marketplace = readJson(path.join(root, ".agents", "plugins", "marketplace.json"));
   assert.equal(marketplace.name, "deepseek-delegate");
   assert.equal(marketplace.plugins.length, 1);
@@ -61,14 +62,23 @@ test("Codex marketplace 安装包发现任务、作业及显式审阅 skills、�
   fs.cpSync(path.resolve(root, entry.source.path), plugin, { recursive: true });
   const manifest = readJson(path.join(plugin, ".codex-plugin", "plugin.json"));
   assert.equal(manifest.name, "deepseek");
-  assert.equal(manifest.version, "0.3.3");
+  assert.equal(manifest.version, "0.3.4");
   assert.equal(manifest.version, readJson(path.join(plugin, ".claude-plugin", "plugin.json")).version);
   assert.equal(manifest.skills, "./codex-skills/");
-  assert.deepEqual(fs.readdirSync(path.join(plugin, manifest.skills)).sort(), ["adversarial-review", "cancel", "result", "review", "setup", "status", "task"]);
-  for (const name of ["setup", "task", "status", "result", "cancel", "review", "adversarial-review"]) {
+  assert.deepEqual(fs.readdirSync(path.join(plugin, manifest.skills)).sort(), ["adversarial-review", "cancel", "result", "review", "setup", "status", "task", "transfer"]);
+  for (const name of ["setup", "task", "status", "result", "cancel", "review", "adversarial-review", "transfer"]) {
     const skill = fs.readFileSync(path.join(plugin, manifest.skills, name, "SKILL.md"), "utf8");
     assert.match(skill, new RegExp(`^---\\r?\\nname: ${name}\\r?\\n`));
   }
+  const transfer = fs.readFileSync(path.join(plugin, manifest.skills, "transfer/SKILL.md"), "utf8");
+  assert.match(transfer, /用户显式调用/);
+  assert.match(transfer, /\.\.\/\.\.\/references\/codex-cli\.md/);
+  for (const flag of ["--source", "--max-chars", "--cwd", "--json"]) assert.ok(transfer.includes(flag));
+  assert.match(transfer, /final_answer/);
+  assert.match(transfer, /CODEX_HOME/);
+  assert.match(transfer, /仅.*确认收到.*等待/);
+  assert.match(fs.readFileSync(path.join(plugin, manifest.skills, "transfer/agents/openai.yaml"), "utf8"),
+    /^policy:\r?\n  allow_implicit_invocation: false\s*$/);
   for (const name of ["review", "adversarial-review"]) {
     const policy = fs.readFileSync(path.join(plugin, manifest.skills, name, "agents/openai.yaml"), "utf8");
     assert.match(policy, /^policy:\r?\n  allow_implicit_invocation: false\s*$/);
@@ -105,6 +115,25 @@ test("Codex marketplace 安装包发现任务、作业及显式审阅 skills、�
   assert.equal(report.hostContext.host, "codex");
   assert.equal(report.hostContext.sessionId, "installed-codex-session");
   assert.equal(fake.readRecord().permissionMode, "read-only");
+  const codexHome = path.join(installed, "codex-home");
+  fs.mkdirSync(path.join(codexHome, "sessions"), { recursive: true });
+  const source = path.join(codexHome, "sessions", "installed.jsonl");
+  const id = "11111111-1111-4111-8111-111111111111";
+  const original = [
+    { type: "session_meta", payload: { id, session_id: id, cwd: installed, source: "vscode" } },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "目标：INSTALLED_TRANSFER" }] } },
+  ].map(record => JSON.stringify(record)).join("\n");
+  fs.writeFileSync(source, original);
+  const transferred = spawnSync(process.execPath, [path.join(plugin, "scripts", "deepseek-host.mjs"),
+    "codex", "transfer", "--source", source, "--json"], {
+    cwd: installed, encoding: "utf8", env: { ...process.env, CODEX_HOME: codexHome,
+      DEEPSEEK_DATA_DIR: path.join(installed, "shared"), DSH_BIN: fake.bin, FAKE_DSH_RECORD: fake.record,
+      GIT_CEILING_DIRECTORIES: fs.realpathSync(os.tmpdir()) },
+  });
+  assert.equal(transferred.status, 0, transferred.stderr);
+  assert.match(JSON.parse(transferred.stdout).handoff, /INSTALLED_TRANSFER/);
+  assert.equal(fake.readRecord().permissionMode, "read-only");
+  assert.equal(fs.readFileSync(source, "utf8"), original);
 });
 
 test("release tree no longer contains the retired deepseek-delegate plugin", () => {

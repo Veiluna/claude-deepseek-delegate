@@ -9,6 +9,7 @@ import { startJob, jobStatus, jobStatuses, jobResult, cancelJob } from "./lib/jo
 import { collectReviewContext } from "./lib/review-git.mjs";
 import { executeReview, reviewPrompt, renderReview } from "./lib/review.mjs";
 import { resolveTranscript, transferSession } from "./lib/transfer.mjs";
+import { resolveCodexTranscript, codexMessages } from "./lib/codex-transcript.mjs";
 import { dataRoot } from "./lib/state.mjs";
 import { migrateData } from "./lib/migration.mjs";
 
@@ -263,7 +264,7 @@ async function cmdReview(argv, kind, hostContext) {
   process.exitCode = result.ok ? 0 : 1;
 }
 
-async function cmdTransfer(argv) {
+async function cmdTransfer(argv, context) {
   const { flags, positional } = parseArgs(argv, ["cwd", "source", "max-chars"]);
   if (positional.length || Object.keys(flags).some((name) => !["cwd", "source", "max-chars", "json"].includes(name))) {
     fail("转交只接受 --source、--cwd、--max-chars、--json。", 2);
@@ -275,8 +276,12 @@ async function cmdTransfer(argv) {
     fail("--max-chars 必须为 512 到 64000 的整数。", 2);
   }
   const cwd = flags.cwd || process.cwd();
-  const source = resolveTranscript(cwd, flags.source);
-  const result = await transferSession({ cwd: resolveWorkspaceRoot(cwd), source, maxChars: flags["max-chars"] === undefined ? undefined : Number(flags["max-chars"]) });
+  const codex = context?.host === "codex";
+  const selected = codex ? resolveCodexTranscript(cwd, flags.source, context) : null;
+  const source = codex ? selected.source : resolveTranscript(cwd, flags.source);
+  const result = await transferSession({ cwd: codex ? selected.workspaceRoot : resolveWorkspaceRoot(cwd), source,
+    ...(codex ? { messages: codexMessages(source, selected), speaker: "Codex" } : {}),
+    maxChars: flags["max-chars"] === undefined ? undefined : Number(flags["max-chars"]) });
   out(flags.json ? JSON.stringify(result, null, 2) : result.ok ?
     `DeepSeek 线程：${result.threadId}\n续接命令：${result.resumeCommand}\n${result.harnessInstructions}` +
       (result.omittedTools || result.compressedMessages ? `\n长度预算：省略 ${result.omittedTools} 条旧工具概况，压缩 ${result.compressedMessages} 段早期文字。` : "") : result.error);
