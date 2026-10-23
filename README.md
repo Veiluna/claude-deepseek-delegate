@@ -114,6 +114,8 @@ Codex 的工具沙箱决定插件进程能访问哪些目录及网络。普通 `
 
 宿主对具体调用的批准仅解决启动环境权限。dsh 仍按每次任务的 `workspace-write` 或 `read-only` 执行，插件不会自动批准 dsh 请求。调用被拒绝时停止；任务已经启动后遇到错误，先核对是否已有线程或作业，不自动重新启动。
 
+Codex 的审阅与其它 skill 需要在宿主允许写入的临时目录中创建临时请求 JSON 文件来安全传参（实测多建在项目根），调用结束即删除。若宿主安装了在“审阅/只读模式”下禁止任何写入的第三方守卫钩子，调用会在启动 dsh 之前被拦下。此时需要用户按该守卫自己的方式授权本次写入，插件不会绕过或修改守卫。
+
 离线测试使用复制后的安装包、合成钩子与假 dsh，能验证插件的输入、状态和权限映射；Windows 11 桌面端及 CLI 的实际安装、信任、工具沙箱和 Harness 连通性须分别记录实机结果。
 
 ### Codex 会话转交
@@ -217,6 +219,8 @@ claude plugin install deepseek@deepseek-delegate --scope user
 Claude 转交只接受 Claude 配置目录 `projects/` 下当前登记或通过 `--source` 指定的普通 `.jsonl` 记录；Codex 的范围见上文。交接说明包含目标、已定决策与约束、涉及文件、验收标准和输出要求；过滤工具正文、文件全文和常见凭据格式，不发送完整记录。缺失的信息保持未知。它以只读方式新开 DeepSeek 线程，仅确认收到并等待用户继续，不自动执行交接任务；原宿主会话保持不变。
 
 成功转交后按输出给出的线程 ID 与打开方式继续。终端续接使用 `dsh tui --resume <线程ID>`，需要本机存在对应 `tui` profile；缺少时保留错误，不自动安装。Harness 仅在已登记工作区显示线程；在 Harness 中核对输出的确切项目根是否登记，父目录登记不代替子项目登记。
+
+在 Windows 上实测 DeepSeek Harness（dsh 0.2.1-rc.2 桌面端）：凡经 `dsh --profile headless` 创建的线程，无论是本插件的任务线程、转交线程，还是不经插件直接用 dsh headless 创建的线程，在 Harness 桌面界面续聊时都会报错 `tools: at least one tool must have defer_loading=false`；Harness 内新建的线程正常。这是 dsh/Harness 的兼容问题，不是插件问题。在其修复前，可用 `dsh --profile headless --session-id <线程ID> "<新消息>"` 在命令行继续同一线程。
 
 ## 可写权限
 
