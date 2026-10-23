@@ -2,7 +2,7 @@
 
 Claude Code 与 Codex 插件：通过本机 DeepSeek Harness 的 `dsh` 调用 DeepSeek。两种宿主均支持环境检查、前台任务、后台作业、跨宿主续接 DeepSeek 线程、只读审阅、对抗式审阅及宿主会话转交。
 
-插件提供调用接口，调用时机由宿主与用户决定。版本为 `0.3.4`；marketplace 名仍为 `deepseek-delegate`，插件名为 `deepseek`。
+插件提供调用接口，调用时机由宿主与用户决定。版本为 `0.3.5`；marketplace 名仍为 `deepseek-delegate`，插件名为 `deepseek`。
 
 ## 前置条件
 
@@ -13,7 +13,7 @@ Claude Code 与 Codex 插件：通过本机 DeepSeek Harness 的 `dsh` 调用 De
 
 插件依次从环境变量 `DSH_BIN`、`PATH` 和默认安装位置查找 dsh。若找不到，可将 `DSH_BIN` 设置为 dsh 的完整路径（Windows 上通常是 `dsh.cmd`），重新启动宿主后运行对应的 setup 入口。
 
-## 安装
+## 安装、更新与卸载
 
 ### Claude Code
 
@@ -26,7 +26,22 @@ claude plugin install deepseek@deepseek-delegate --scope user
 
 若已添加该 marketplace，先运行 `claude plugin marketplace update deepseek-delegate` 刷新目录，再安装。上述命令安装到用户范围；团队项目可按需将 `--scope user` 改为 `--scope project`，仅本项目本机使用可改为 `--scope local`。
 
-打开新的 Claude 会话，运行：
+更新已安装插件：
+
+```bash
+claude plugin marketplace update deepseek-delegate
+claude plugin update deepseek@deepseek-delegate --scope user
+```
+
+卸载插件：
+
+```bash
+claude plugin uninstall deepseek@deepseek-delegate --scope user
+```
+
+更新、卸载的 scope 应与原安装一致；多范围安装须分别处理。先等待或取消本插件运行中的作业，再更新或卸载。卸载插件不会执行本插件的共享数据迁移或删除操作；共享数据根由用户单独管理，保留它可供重新安装后继续使用。
+
+安装或更新后打开新的 Claude 会话，确认 `/deepseek:setup`、`/deepseek:task`、`/deepseek:status`、`/deepseek:result`、`/deepseek:cancel`、`/deepseek:review`、`/deepseek:adversarial-review`、`/deepseek:transfer` 八个命令及 `deepseek:deepseek-agent` 子代理可见。卸载后在新会话确认这些入口不再加载。检查环境时运行：
 
 ```text
 /deepseek:setup
@@ -44,9 +59,26 @@ codex plugin add deepseek@deepseek-delegate --json
 codex plugin list --json
 ```
 
-已有 marketplace 时用 `codex plugin marketplace upgrade deepseek-delegate` 刷新，再安装插件。本地开发可将第一条命令的仓库来源替换为仓库根目录的绝对路径。原生目录清单位于 `.agents/plugins/marketplace.json`，组件保留在 `deepseek/` 内；Codex skills 放在清单显式指定的 `codex-skills/`，避免覆盖 Claude 默认发现的同名命令。
+已有 marketplace 时刷新目录并重新安装，以取得更新后的插件：
 
-打开新的 Codex 聊天，确认 `deepseek:setup` 与 `deepseek:task` skills 可见，然后显式调用：
+```bash
+codex plugin marketplace upgrade deepseek-delegate --json
+codex plugin add deepseek@deepseek-delegate --json
+codex plugin list --json
+```
+
+卸载插件：
+
+```bash
+codex plugin remove deepseek@deepseek-delegate --json
+codex plugin list --json
+```
+
+先等待或取消本插件运行中的作业，再更新或卸载。卸载移除插件安装及缓存；本插件不会因此迁移或删除 `DEEPSEEK_DATA_DIR` 中的共享项目数据。重新安装仍可使用原共享根，不要为重装清空它。
+
+本地开发可将 marketplace add 的仓库来源替换为仓库根目录的绝对路径。原生目录清单位于 `.agents/plugins/marketplace.json`，组件保留在 `deepseek/` 内；Codex skills 放在清单显式指定的 `codex-skills/`，避免覆盖 Claude 默认发现的同名命令。
+
+安装或更新后，分别打开新的 Codex 桌面聊天与 CLI 会话，确认 `deepseek:setup`、`deepseek:task`、`deepseek:status`、`deepseek:result`、`deepseek:cancel`、`deepseek:review`、`deepseek:adversarial-review`、`deepseek:transfer` 八个 skills 可见。卸载后在新会话确认入口不再加载。检查环境与执行任务时显式调用：
 
 ```text
 $deepseek:setup
@@ -66,9 +98,25 @@ $deepseek:adversarial-review --scope branch -- 重点检查恢复流程的假设
 
 两种审阅支持 `--scope`、`--base`、`--model`、`--effort`、`--background`、`--cwd`、`--json`，与 Claude 使用同一范围采集、schema、作业及结果核心。先预检未跟踪文件在内的规模，空范围直接结束，未明确执行方式时按建议询问一次前台或后台。对抗式关注点用 stdin 保留原文。审阅始终只读，不自动修复，不改变可续接线程；失败时展示核心给出的错误与保留结果，不将截断进度当 `final`。
 
-安装时遵循 Codex 的正常确认与信任提示，在 `/hooks` 中审阅并启用插件的 SessionStart、SessionEnd 钩子。后台作业需要有效的主线程 SessionStart 登记；未登记或未知身份可执行前台任务。真正结束宿主会话时分离清理所属作业，切换聊天和回合结束不清理，恢复后新作业受固定序号围栏保护。插件不会自动批准 dsh 的授权请求。当前变更已用合成钩子和假 dsh 离线验证，桌面端及 CLI 的正常安装与信任流程仍需分别实机验收。
+#### 正常钩子信任与会话结束
 
-本票验证为离线安装包复制及 fake-dsh CLI 测试；Windows 11 桌面端和 CLI 的真实安装、登录与权限验收另行执行。
+安装或启用插件不会自动信任 hooks。在 Codex 的启动审阅界面或 `/hooks` 中，检查 deepseek 的 SessionStart、SessionEnd 定义及它们指向的已安装脚本，再通过正常界面信任并启用本插件的钩子。更新后若定义变化而再次要求审阅，按新定义重新确认；不要跳过 hook trust。
+
+完成信任后新开一个 Codex 主线程，验证 SessionStart 登记。后台作业需要有效的主线程登记；身份未知时可执行前台任务，不能伪造编号或登记来启动后台作业。SessionStart 只登记宿主上下文，不注入分派规则。
+
+只有真正结束宿主会话才清理所属作业；回合结束、切换聊天以及恢复同一会话不会清理新作业。桌面端验证时，在合成会话创建运行中作业，先完成回合并切换后返回，再归档或删除仍打开的该合成聊天，核对两次动作后的作业状态。CLI 则正常退出该合成会话并核对所属作业。不要用 Stop 或手动发送钩子输入代替真实结束操作。
+
+#### Codex 调用权限
+
+Codex 的工具沙箱决定插件进程能访问哪些目录及网络。普通 `workspace-write` 不保证共享根 `~/.deepseek-plugin/`、Harness 运行数据和联网已获允许；安装插件、信任 hooks 或获得 `PLUGIN_DATA` 环境变量也不能作为这些权限已授予的证据。
+
+需要额外权限时，由 Codex 对本次具体调用发起正常授权，说明子命令、项目根、共享数据目录以及实际所需的 Harness 数据和网络访问。审阅请求后决定是否批准；不要为此开启全局 full-access、跳过沙箱或批准通用 `node` 执行前缀。`--add-dir` 只增加可写目录，不授予网络访问。Codex 0.162.1 默认未启用 `request_permissions` 和命令内细粒度权限申请，按当前客户端实际提供的工具处理；skill 的执行细则见 [Codex 宿主调用](deepseek/references/codex-cli.md)。
+
+宿主对具体调用的批准仅解决启动环境权限。dsh 仍按每次任务的 `workspace-write` 或 `read-only` 执行，插件不会自动批准 dsh 请求。调用被拒绝时停止；任务已经启动后遇到错误，先核对是否已有线程或作业，不自动重新启动。
+
+Codex 的审阅与其它 skill 需要在宿主允许写入的临时目录中创建临时请求 JSON 文件来安全传参（实测多建在项目根），调用结束即删除。若宿主安装了在“审阅/只读模式”下禁止任何写入的第三方守卫钩子，调用会在启动 dsh 之前被拦下。此时需要用户按该守卫自己的方式授权本次写入，插件不会绕过或修改守卫。
+
+离线测试使用复制后的安装包、合成钩子与假 dsh，能验证插件的输入、状态和权限映射；Windows 11 桌面端及 CLI 的实际安装、信任、工具沙箱和 Harness 连通性须分别记录实机结果。
 
 ### Codex 会话转交
 
@@ -80,11 +128,15 @@ $deepseek:adversarial-review --scope branch -- 重点检查恢复流程的假设
 
 首版以 [Codex 0.162.1 官方记录格式](https://github.com/openai/codex/tree/7a078f6bb4ce0dc2a81408b334ce52979d92c603/codex-rs/history/src) 为据，只支持主线程的 `cli`、`vscode`、`exec`、`mcp` 来源；custom、internal、subagent、缺失或未知来源均失败。仅纳入 `response_item` 用户 `input_text` 与助手明确 `phase: final_answer` 的 `output_text`；缺失及其他 phase 的助手文字省略，`event_msg` 不重复消费。event-only、未知消息格式和损坏 JSON 均停止，不回显原记录。分析、文件全文、工具正文和常见凭据过滤，工具仅留结果未核实的有限概况。默认预算为 12000 个 UTF-16 单元，`--max-chars` 可设为 512 到 64000；缺失信息保持未知。
 
-成功后按输出的真实项目根、线程 ID 与 Harness/tui 指引继续。`tui` 需要已有对应 profile；插件不会自动安装它，也不会自动登记 Harness 工作区。上述验证为合成脱敏 JSONL 和 fake dsh 的离线测试，真实客户端验收另行执行。
+成功后按输出的真实项目根和线程 ID 在 Harness 打开线程。该项目根必须已登记为 Harness 工作区；登记父目录不代表其子项目已登记，必要时在 Harness 中手动登记输出中的确切项目根。打开后发送一条新的合成消息，确认能在同一线程继续。
+
+终端方式为输出中的 `dsh tui --resume <线程ID>`，需要本机已有对应 `tui` profile。缺少 profile 时终端续接不可用，应保留实际错误并使用 Harness 的已登记工作区查找线程；插件不会自动安装 profile、登记工作区或修改 Harness 配置。
 
 ## 共享数据与从 0.2.0 迁移
 
-Claude 与 Codex 入口使用 `DEEPSEEK_DATA_DIR`，未设置时使用 `~/.deepseek-plugin/`。项目候选、作业和日志位于 `projects/<项目键>/`；`hosts/` 为宿主登记保留。两端使用同一个共享根，项目的 DeepSeek 线程可以跨宿主续接。
+Claude 与 Codex 入口使用 `DEEPSEEK_DATA_DIR`，未设置时使用 `~/.deepseek-plugin/`。项目候选、作业和日志位于 `projects/<项目键>/`；`hosts/` 保存宿主登记。两端使用同一个共享根，项目的 DeepSeek 线程可以跨宿主续接，作业默认按宿主种类和真实会话编号隔离。
+
+各宿主须从启动时继承同一个共享根设置。只给某一条命令临时覆盖 `DEEPSEEK_DATA_DIR`，不会让已启动桌面会话的 SessionStart/SessionEnd 改用该目录；变更设置后重新启动相关宿主，并核对 setup 报告的根目录。不要用 `PLUGIN_DATA` 或 `CLAUDE_PLUGIN_DATA` 覆盖新入口的共享根。实机检查使用唯一合成项目与真实宿主身份，保留根目录里其他项目和会话的数据。
 
 旧底层脚本仍兼容直接调用：未设置 `DEEPSEEK_DATA_DIR` 时使用 `CLAUDE_PLUGIN_DATA` 或旧默认目录，项目目录直接位于旧根下；设置共享变量后则使用其 `projects/`。新入口不会自动合并旧数据。普通 setup 若能读取 `CLAUDE_PLUGIN_DATA`，只提示该路径，不猜测旧目录。
 
@@ -166,7 +218,9 @@ claude plugin install deepseek@deepseek-delegate --scope user
 
 Claude 转交只接受 Claude 配置目录 `projects/` 下当前登记或通过 `--source` 指定的普通 `.jsonl` 记录；Codex 的范围见上文。交接说明包含目标、已定决策与约束、涉及文件、验收标准和输出要求；过滤工具正文、文件全文和常见凭据格式，不发送完整记录。缺失的信息保持未知。它以只读方式新开 DeepSeek 线程，仅确认收到并等待用户继续，不自动执行交接任务；原宿主会话保持不变。
 
-成功转交后按输出给出的线程 ID 与打开方式继续。终端续接使用 `dsh tui --resume <线程ID>`，需要本机存在对应 `tui` profile。Harness 仅在已登记工作区显示线程；必要时先手动登记输出中的项目根目录。
+成功转交后按输出给出的线程 ID 与打开方式继续。终端续接使用 `dsh tui --resume <线程ID>`，需要本机存在对应 `tui` profile；缺少时保留错误，不自动安装。Harness 仅在已登记工作区显示线程；在 Harness 中核对输出的确切项目根是否登记，父目录登记不代替子项目登记。
+
+在 Windows 上实测 DeepSeek Harness（dsh 0.2.1-rc.2 桌面端）：凡经 `dsh --profile headless` 创建的线程，无论是本插件的任务线程、转交线程，还是不经插件直接用 dsh headless 创建的线程，在 Harness 桌面界面续聊时都会报错 `tools: at least one tool must have defer_loading=false`；Harness 内新建的线程正常。这是 dsh/Harness 的兼容问题，不是插件问题。在其修复前，可用 `dsh --profile headless --session-id <线程ID> "<新消息>"` 在命令行继续同一线程。
 
 ## 可写权限
 
@@ -199,7 +253,7 @@ claude plugin validate ./.claude-plugin/marketplace.json
 
 在 `deepseek/` 下运行 `npm test`。测试使用 fake dsh，不调用真实 dsh、不联网、不需要 Harness 登录。
 
-外部 CLI 接口 `node deepseek/scripts/deepseek-host.mjs codex [--session-id <真实编号>] task --fresh --prompt-stdin` 从 stdin 读取正文；`review-context --prompt-stdin` 与 `adversarial-review --prompt-stdin` 使用同一读取方式接收关注点，普通 `review` 拒绝附加关注点。身份参数放在命令前，缺失时保持未知。`--prompt-stdin` 与位置正文互斥，空白正文报错；不使用该选项的旧 CLI 参数语义保持兼容。skills 用固定 Node 启动代码从临时 JSON 请求文件构造参数数组，将正文放进子进程 stdin，不拼接到 shell。安装包测试会从原生 marketplace 复制完整目录并调用包内入口检查环境。
+外部 CLI 接口 `node deepseek/scripts/deepseek-host.mjs codex [--session-id <真实编号>] task --fresh --prompt-stdin` 从 stdin 读取正文；`review-context --prompt-stdin` 与 `adversarial-review --prompt-stdin` 使用同一读取方式接收关注点，普通 `review` 拒绝附加关注点。身份参数放在命令前，缺失时保持未知。`--prompt-stdin` 与位置正文互斥，空白正文报错；不使用该选项的旧 CLI 参数语义保持兼容。skills 用固定 Node 启动代码从临时 JSON 请求文件构造参数数组，将正文放进子进程 stdin，不拼接到 shell。安装包测试会从原生 marketplace 复制完整目录，并以假 dsh 调用包内入口检查环境和转交合成记录；这不代表宿主的真实沙箱或 UI 已验收。
 
 ## 许可
 

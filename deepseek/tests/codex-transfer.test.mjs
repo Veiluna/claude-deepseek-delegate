@@ -5,6 +5,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setup, makeGitRepo } from "./helpers.mjs";
+import { codexMessages, resolveCodexTranscript } from "../scripts/lib/codex-transcript.mjs";
+import { buildHandoff } from "../scripts/lib/transfer.mjs";
 
 const entry = fileURLToPath(new URL("../scripts/deepseek-host.mjs", import.meta.url));
 const sessionId = "11111111-1111-4111-8111-111111111111";
@@ -41,6 +43,107 @@ function fixture(t) {
   });
   return { ...f, cwd, home, shared, source, run, meta, write, start };
 }
+
+const windowsOnly = { skip: process.platform !== "win32" && "仅 Windows 支持本回归用例的命名空间路径" };
+for (const prefix of ["\\\\?\\"]) {
+  test(`Codex Windows 前缀 ${prefix} 的登记及显式来源与普通路径转交一致`, windowsOnly, (t) => {
+    const f = fixture(t);
+    f.write([f.meta(), message("user", "目标：WINDOWS_TRANSCRIPT_SOURCE"), message("assistant", "约束：保持身份校验。")]);
+    const original = fs.readFileSync(f.source, "utf8");
+    const plain = f.run(["transfer", "--source", f.source, "--json"]);
+    assert.equal(plain.code, 0, plain.stderr);
+    const expected = JSON.parse(plain.stdout);
+    const sent = f.readRecord();
+    const source = prefix + f.source;
+    assert.equal(f.start(source).code, 0);
+    const owners = path.join(f.shared, "hosts", "codex");
+    const ownerFile = path.join(owners, fs.readdirSync(owners)[0], "session.json");
+    const ownerBefore = fs.readFileSync(ownerFile, "utf8");
+    assert.equal(JSON.parse(ownerBefore).transcriptSource, source);
+    for (const [args, options] of [
+      [["transfer", "--json"], {}],
+      [["transfer", "--json"], { transcriptSource: source }],
+      [["transfer", "--source", source, "--json"], { id: null }],
+    ]) {
+      const result = f.run(args, options);
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), expected);
+      const record = f.readRecord();
+      assert.equal(record.stdin, sent.stdin);
+      assert.equal(record.cwd, f.cwd);
+      assert.equal(record.permissionMode, "read-only");
+    }
+    assert.equal(fs.readFileSync(f.source, "utf8"), original);
+    assert.equal(fs.readFileSync(ownerFile, "utf8"), ownerBefore);
+  });
+
+  test(`Codex Windows 前缀 ${prefix} 仍拒绝越界、非 .jsonl 和非普通文件`, windowsOnly, (t) => {
+    const f = fixture(t);
+    const outside = path.join(f.home, "outside.jsonl");
+    const wrong = path.join(path.dirname(f.source), "wrong.txt");
+    const directory = path.join(path.dirname(f.source), "directory.jsonl");
+    const linked = path.join(path.dirname(f.source), "linked.jsonl");
+    f.write([f.meta(), message("user", "目标：不得转交的记录。")], outside);
+    fs.copyFileSync(outside, wrong);
+    fs.mkdirSync(directory);
+    fs.symlinkSync(f.home, linked, "junction");
+    for (const target of [outside, wrong, directory, path.join(linked, "outside.jsonl")]) {
+      const plain = f.run(["transfer", "--source", target, "--json"]);
+      assert.notEqual(plain.code, 0);
+      assert.match(plain.stderr, /只接受 CODEX_HOME\/sessions 下已存在的普通 \.jsonl 会话记录；不允许链接逃逸。/);
+      const source = prefix + target;
+      assert.equal(f.start(source).code, 0);
+      for (const args of [["transfer", "--json"], ["transfer", "--source", source, "--json"]]) {
+        const result = f.run(args);
+        assert.equal(result.code, plain.code);
+        assert.equal(result.stderr, plain.stderr);
+        assert.equal(result.stdout, "");
+        assert.equal(fs.existsSync(f.record), false);
+      }
+    }
+  });
+
+  test(`Codex Windows 前缀 ${prefix} 的盘符及 UNC 来源在 realpath 校验前转换`, windowsOnly, (t) => {
+    const f = fixture(t);
+    f.write([f.meta(), message("user", "目标：UNC 路径。")]);
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = f.home;
+    t.after(() => { if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome; });
+    assert.equal(resolveCodexTranscript(f.cwd, prefix + f.source).source, f.source);
+    const outside = path.join(f.home, "outside.jsonl");
+    const wrong = path.join(path.dirname(f.source), "wrong.txt");
+    const directory = path.join(path.dirname(f.source), "directory.jsonl");
+    fs.copyFileSync(f.source, outside);
+    fs.copyFileSync(f.source, wrong);
+    fs.mkdirSync(directory);
+    for (const target of [outside, wrong, directory]) {
+      assert.throws(() => resolveCodexTranscript(f.cwd, prefix + target),
+        /只接受 CODEX_HOME\/sessions 下已存在的普通 \.jsonl 会话记录；不允许链接逃逸。/);
+    }
+    const realpath = fs.realpathSync;
+    let requested;
+    // 不访问网络共享；仅核对进入既有 realpath 校验的 UNC 路径。
+    t.mock.method(fs, "realpathSync", (target, ...args) => {
+      if (typeof target === "string" && target.includes("server\\share")) {
+        requested = target;
+        return f.source;
+      }
+      return realpath(target, ...args);
+    });
+    assert.equal(resolveCodexTranscript(f.cwd, prefix + "UNC\\server\\share\\rollout.jsonl").source, f.source);
+    assert.equal(requested, "\\\\server\\share\\rollout.jsonl");
+  });
+}
+
+test("Codex 拒绝单反斜杠 Windows 前缀来源", windowsOnly, (t) => {
+  const f = fixture(t);
+  f.write([f.meta(), message("user", "目标：拒绝无效前缀。")]);
+  const result = f.run(["transfer", "--source", "\\?\\" + f.source, "--json"]);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /只接受 CODEX_HOME\/sessions 下已存在的普通 \.jsonl 会话记录；不允许链接逃逸。/);
+  assert.equal(result.stdout, "");
+  assert.equal(fs.existsSync(f.record), false);
+});
 
 test("Codex 显式来源共用五部分交接说明，在项目根只读新开线程且保留原记录和候选", (t) => {
   const f = fixture(t);
@@ -210,6 +313,106 @@ test("Codex 仅取 response_item 用户文字与明确最终回复，双表示�
   assert.match(payload.handoff, /保留正常目标/);
   assert.match(payload.handoff, /已隐藏/);
 });
+
+function writeMarkedRollout(f) {
+  const marked = (texts, kinds) => message("user", "", {
+    content: texts.map(text => ({ type: "input_text", text })),
+    internal_chat_message_metadata_passthrough: { content_item_kinds: kinds },
+  });
+  const injected = ["INJECTED_AGENTS_MARKER", "INJECTED_ENVIRONMENT_MARKER", "INJECTED_SKILL_MARKER",
+    "INJECTED_APP_PAGE_MARKER", "INJECTED_MIXED_MARKER", "INJECTED_MIXED_FIRST_MARKER"];
+  const genuine = ["TYPED_FIRST_MARKER", "TYPED_SECOND_MARKER", "TYPED_MIXED_MARKER", "TYPED_MIXED_LAST_MARKER",
+    "LEGACY_ABSENT_MARKER", "LEGACY_NULL_MARKER"];
+  f.write([f.meta({ cli_version: "0.163.0" }),
+    marked(injected.slice(0, 2), ["agents_md.instructions", "environments.environment_context"]),
+    marked([`<skill>${injected[2]}</skill>`], ["skills.selected_skill_instructions"]),
+    marked([injected[3]], ["additional_content.codex_apps_open_page"]),
+    marked(genuine.slice(0, 2), ["user.text", "user.text"]),
+    marked([genuine[2], injected[4]], ["user.text", "skills.selected_skill_instructions"]),
+    marked([injected[5], genuine[3]], ["agents_md.instructions", "user.text"]),
+    message("user", genuine[4]),
+    message("user", genuine[5], { internal_chat_message_metadata_passthrough: null }),
+  ]);
+  return { injected, genuine };
+}
+
+test("Codex 按内容来源仅转交 user.text 和旧记录文字，交接说明和 fake dsh 均无宿主注入", (t) => {
+  const f = fixture(t);
+  const { injected, genuine } = writeMarkedRollout(f);
+  const result = f.run(["transfer", "--source", f.source, "--json"]);
+  assert.equal(result.code, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  const sent = f.readRecord().stdin;
+  for (const text of genuine) {
+    assert.ok(payload.handoff.includes(text), text);
+    assert.ok(sent.includes(text), text);
+  }
+  for (const text of injected) assert.equal((result.stdout + result.stderr + sent).includes(text), false, text);
+});
+
+test("Codex 内容来源同进程解析与交接说明跳过注入，保留多片段、混合片段和旧记录", async (t) => {
+  const f = fixture(t);
+  const { injected, genuine } = writeMarkedRollout(f);
+  const messages = [];
+  for await (const item of codexMessages(f.source, { expectedSessionId: sessionId, workspaceRoot: f.cwd })) messages.push(item);
+  assert.deepEqual(messages, [
+    { role: "user", text: genuine.slice(0, 2).join("\n") },
+    ...genuine.slice(2).map(text => ({ role: "user", text })),
+  ]);
+  const payload = await buildHandoff(f.source, 12000, { messages, speaker: "Codex" });
+  for (const text of genuine) assert.ok(payload.handoff.includes(text), text);
+  for (const text of injected) assert.equal(payload.handoff.includes(text), false, text);
+});
+
+test("Codex 只有宿主注入文字时不转交或启动 dsh", (t) => {
+  const f = fixture(t);
+  f.write([f.meta(), message("user", "INJECTED_ONLY_MARKER", {
+    internal_chat_message_metadata_passthrough: { content_item_kinds: ["skills.selected_skill_instructions"] },
+  })]);
+  const result = f.run(["transfer", "--source", f.source, "--json"]);
+  assert.notEqual(result.code, 0);
+  assert.equal(result.stdout, "");
+  assert.doesNotMatch(result.stderr, /INJECTED_ONLY_MARKER/);
+  assert.equal(fs.existsSync(f.record), false);
+});
+
+const malformedKinds = [
+  ["字符串", "user.text"], ["对象", { 0: "user.text", length: 1 }], ["null", null],
+  ["非字符串元素", [42]], ["混合元素", ["user.text", null]],
+  ["空数组长度不符", []], ["多余元素长度不符", ["user.text", "user.text"]],
+];
+
+test("Codex 内容来源同进程解析拒绝异常标记和纯注入，不生成交接说明", async (t) => {
+  const f = fixture(t);
+  const handoff = () => buildHandoff(f.source, 12000, {
+    messages: codexMessages(f.source, { expectedSessionId: sessionId, workspaceRoot: f.cwd }), speaker: "Codex",
+  });
+  for (const [name, kinds] of malformedKinds) {
+    f.write([f.meta(), message("user", "VALID_BEFORE_MALFORMED_MARKER"), message("user", "MALFORMED_KINDS_MARKER", {
+      internal_chat_message_metadata_passthrough: { content_item_kinds: kinds },
+    })]);
+    await assert.rejects(handoff, { message: "不支持的 Codex 记录消息格式，未转交任何内容。" }, name);
+  }
+  f.write([f.meta(), message("user", "INJECTED_ONLY_MARKER", {
+    internal_chat_message_metadata_passthrough: { content_item_kinds: ["skills.selected_skill_instructions"] },
+  })]);
+  await assert.rejects(handoff, /不支持的 Codex 记录消息格式：需要 response_item/);
+});
+
+for (const [name, kinds] of malformedKinds) {
+  test(`Codex content_item_kinds ${name} 时拒绝整个转交，不回显或发送文字`, (t) => {
+    const f = fixture(t);
+    f.write([f.meta(), message("user", "VALID_BEFORE_MALFORMED_MARKER"), message("user", "MALFORMED_KINDS_MARKER", {
+      internal_chat_message_metadata_passthrough: { content_item_kinds: kinds },
+    })]);
+    const result = f.run(["transfer", "--source", f.source, "--json"]);
+    assert.notEqual(result.code, 0);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /不支持的 Codex 记录消息格式，未转交任何内容。/);
+    assert.doesNotMatch(result.stderr, /MARKER/);
+    assert.equal(fs.existsSync(f.record), false);
+  });
+}
 
 test("Codex 未知消息格式、event-only、无效 JSON 和不可转交文字明确失败，不回显或发送原记录", (t) => {
   const f = fixture(t);

@@ -43,6 +43,10 @@ export function resolveCodexTranscript(cwd, source, context) {
     if (ownerWorkspaceRoot !== undefined && !samePath(projectRoot(ownerWorkspaceRoot), workspaceRoot)) throw new Error();
   } catch { throw new Error("Codex 记录来源的登记项目与当前项目不符或无法核实。"); }
   try {
+    if (process.platform === "win32") {
+      source = source.replace(/^\\\\\?\\UNC\\/i, "\\\\")
+        .replace(/^\\\\\?\\(?=[a-z]:\\)/i, "");
+    }
     const requested = path.resolve(cwd, source);
     const sessions = fs.realpathSync(path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions"));
     const real = fs.realpathSync(requested);
@@ -86,11 +90,19 @@ export async function* codexMessages(source, { expectedSessionId, workspaceRoot 
     if (["system", "developer"].includes(item.role)) continue;
     if (!Array.isArray(item.content) || item.content.some(part => !object(part) || !contentTypes.has(part.type) ||
       (["input_text", "output_text"].includes(part.type) && typeof part.text !== "string"))) throw unsupported();
+    let content = item.content;
+    const kinds = item.internal_chat_message_metadata_passthrough?.content_item_kinds;
+    if (item.role === "user" && kinds !== undefined) {
+      if (!Array.isArray(kinds) || kinds.length !== content.length || kinds.some(kind => typeof kind !== "string")) throw unsupported();
+      // 宿主注入也使用 user 角色；按原始内容索引核对来源，不作为用户文字转交。
+      content = content.filter((part, index) => part.type === "input_text" && kinds[index] === "user.text");
+      if (content.length === 0) continue;
+    }
     supportedMessage = true;
     // 当前已核实 schema 没有 channel；不把未知 channel 或缺失 phase 当最终回复。
     if (item.channel != null || (item.role === "assistant" && item.phase !== "final_answer")) continue;
     const type = item.role === "user" ? "input_text" : "output_text";
-    const text = item.content.filter(part => part.type === type).map(part => part.text).join("\n");
+    const text = content.filter(part => part.type === type).map(part => part.text).join("\n");
     yield { role: item.role, text };
   }
   if (!metadata) throw new Error("不支持的 Codex 记录格式：缺少首条会话身份。");
