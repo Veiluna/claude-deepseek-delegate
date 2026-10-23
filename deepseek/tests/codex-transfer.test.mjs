@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setup, makeGitRepo } from "./helpers.mjs";
+import { resolveCodexTranscript } from "../scripts/lib/codex-transcript.mjs";
 
 const entry = fileURLToPath(new URL("../scripts/deepseek-host.mjs", import.meta.url));
 const sessionId = "11111111-1111-4111-8111-111111111111";
@@ -41,6 +42,107 @@ function fixture(t) {
   });
   return { ...f, cwd, home, shared, source, run, meta, write, start };
 }
+
+const windowsOnly = { skip: process.platform !== "win32" && "仅 Windows 支持本回归用例的命名空间路径" };
+for (const prefix of ["\\\\?\\"]) {
+  test(`Codex Windows 前缀 ${prefix} 的登记及显式来源与普通路径转交一致`, windowsOnly, (t) => {
+    const f = fixture(t);
+    f.write([f.meta(), message("user", "目标：WINDOWS_TRANSCRIPT_SOURCE"), message("assistant", "约束：保持身份校验。")]);
+    const original = fs.readFileSync(f.source, "utf8");
+    const plain = f.run(["transfer", "--source", f.source, "--json"]);
+    assert.equal(plain.code, 0, plain.stderr);
+    const expected = JSON.parse(plain.stdout);
+    const sent = f.readRecord();
+    const source = prefix + f.source;
+    assert.equal(f.start(source).code, 0);
+    const owners = path.join(f.shared, "hosts", "codex");
+    const ownerFile = path.join(owners, fs.readdirSync(owners)[0], "session.json");
+    const ownerBefore = fs.readFileSync(ownerFile, "utf8");
+    assert.equal(JSON.parse(ownerBefore).transcriptSource, source);
+    for (const [args, options] of [
+      [["transfer", "--json"], {}],
+      [["transfer", "--json"], { transcriptSource: source }],
+      [["transfer", "--source", source, "--json"], { id: null }],
+    ]) {
+      const result = f.run(args, options);
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), expected);
+      const record = f.readRecord();
+      assert.equal(record.stdin, sent.stdin);
+      assert.equal(record.cwd, f.cwd);
+      assert.equal(record.permissionMode, "read-only");
+    }
+    assert.equal(fs.readFileSync(f.source, "utf8"), original);
+    assert.equal(fs.readFileSync(ownerFile, "utf8"), ownerBefore);
+  });
+
+  test(`Codex Windows 前缀 ${prefix} 仍拒绝越界、非 .jsonl 和非普通文件`, windowsOnly, (t) => {
+    const f = fixture(t);
+    const outside = path.join(f.home, "outside.jsonl");
+    const wrong = path.join(path.dirname(f.source), "wrong.txt");
+    const directory = path.join(path.dirname(f.source), "directory.jsonl");
+    const linked = path.join(path.dirname(f.source), "linked.jsonl");
+    f.write([f.meta(), message("user", "目标：不得转交的记录。")], outside);
+    fs.copyFileSync(outside, wrong);
+    fs.mkdirSync(directory);
+    fs.symlinkSync(f.home, linked, "junction");
+    for (const target of [outside, wrong, directory, path.join(linked, "outside.jsonl")]) {
+      const plain = f.run(["transfer", "--source", target, "--json"]);
+      assert.notEqual(plain.code, 0);
+      assert.match(plain.stderr, /只接受 CODEX_HOME\/sessions 下已存在的普通 \.jsonl 会话记录；不允许链接逃逸。/);
+      const source = prefix + target;
+      assert.equal(f.start(source).code, 0);
+      for (const args of [["transfer", "--json"], ["transfer", "--source", source, "--json"]]) {
+        const result = f.run(args);
+        assert.equal(result.code, plain.code);
+        assert.equal(result.stderr, plain.stderr);
+        assert.equal(result.stdout, "");
+        assert.equal(fs.existsSync(f.record), false);
+      }
+    }
+  });
+
+  test(`Codex Windows 前缀 ${prefix} 的盘符及 UNC 来源在 realpath 校验前转换`, windowsOnly, (t) => {
+    const f = fixture(t);
+    f.write([f.meta(), message("user", "目标：UNC 路径。")]);
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = f.home;
+    t.after(() => { if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome; });
+    assert.equal(resolveCodexTranscript(f.cwd, prefix + f.source).source, f.source);
+    const outside = path.join(f.home, "outside.jsonl");
+    const wrong = path.join(path.dirname(f.source), "wrong.txt");
+    const directory = path.join(path.dirname(f.source), "directory.jsonl");
+    fs.copyFileSync(f.source, outside);
+    fs.copyFileSync(f.source, wrong);
+    fs.mkdirSync(directory);
+    for (const target of [outside, wrong, directory]) {
+      assert.throws(() => resolveCodexTranscript(f.cwd, prefix + target),
+        /只接受 CODEX_HOME\/sessions 下已存在的普通 \.jsonl 会话记录；不允许链接逃逸。/);
+    }
+    const realpath = fs.realpathSync;
+    let requested;
+    // 不访问网络共享；仅核对进入既有 realpath 校验的 UNC 路径。
+    t.mock.method(fs, "realpathSync", (target, ...args) => {
+      if (typeof target === "string" && target.includes("server\\share")) {
+        requested = target;
+        return f.source;
+      }
+      return realpath(target, ...args);
+    });
+    assert.equal(resolveCodexTranscript(f.cwd, prefix + "UNC\\server\\share\\rollout.jsonl").source, f.source);
+    assert.equal(requested, "\\\\server\\share\\rollout.jsonl");
+  });
+}
+
+test("Codex 拒绝单反斜杠 Windows 前缀来源", windowsOnly, (t) => {
+  const f = fixture(t);
+  f.write([f.meta(), message("user", "目标：拒绝无效前缀。")]);
+  const result = f.run(["transfer", "--source", "\\?\\" + f.source, "--json"]);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /只接受 CODEX_HOME\/sessions 下已存在的普通 \.jsonl 会话记录；不允许链接逃逸。/);
+  assert.equal(result.stdout, "");
+  assert.equal(fs.existsSync(f.record), false);
+});
 
 test("Codex 显式来源共用五部分交接说明，在项目根只读新开线程且保留原记录和候选", (t) => {
   const f = fixture(t);

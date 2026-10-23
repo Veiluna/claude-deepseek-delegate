@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { setup, makeGitRepo } from "./helpers.mjs";
+import { resolveTranscript } from "../scripts/lib/transfer.mjs";
 
 const message = (role, content) => ({ type: role, message: { role, content } });
 function fixture() {
@@ -18,6 +19,95 @@ function fixture() {
       env: { CLAUDE_CONFIG_DIR: config, CLAUDE_TRANSCRIPT_PATH: source, ...env } }),
   };
 }
+
+const windowsOnly = { skip: process.platform !== "win32" && "仅 Windows 支持本回归用例的命名空间路径" };
+for (const prefix of ["\\\\?\\"]) {
+  test(`Claude Windows 前缀 ${prefix} 的登记及显式来源与普通路径转交一致`, windowsOnly, (t) => {
+    const f = fixture();
+    t.after(() => {
+      for (const target of [path.dirname(f.data), f.cwd]) fs.rmSync(target, { recursive: true, force: true });
+    });
+    f.write([message("user", "目标：WINDOWS_CLAUDE_SOURCE")]);
+    const plain = f.transfer(["--json"]);
+    assert.equal(plain.code, 0, plain.stderr);
+    const expected = JSON.parse(plain.stdout);
+    const sent = f.readRecord();
+    const source = prefix + f.source;
+    for (const [args, env] of [[["--json"], { CLAUDE_TRANSCRIPT_PATH: source }], [["--source", source, "--json"], {}]]) {
+      const result = f.transfer(args, env);
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), expected);
+      assert.equal(f.readRecord().stdin, sent.stdin);
+      assert.equal(f.readRecord().cwd, f.cwd);
+      assert.equal(f.readRecord().permissionMode, "read-only");
+    }
+    const outside = path.join(f.config, "outside.jsonl");
+    const wrong = path.join(f.projects, "wrong.txt");
+    const directory = path.join(f.projects, "directory.jsonl");
+    fs.copyFileSync(f.source, outside);
+    fs.copyFileSync(f.source, wrong);
+    fs.mkdirSync(directory);
+    fs.rmSync(f.record);
+    for (const target of [outside, wrong, directory]) {
+      const rejected = f.transfer(["--source", target]);
+      assert.notEqual(rejected.code, 0);
+      const result = f.transfer(["--source", prefix + target]);
+      assert.equal(result.code, rejected.code);
+      assert.equal(result.stderr, rejected.stderr);
+      assert.equal(result.stdout, "");
+      assert.equal(fs.existsSync(f.record), false);
+    }
+  });
+
+  test(`Claude Windows 前缀 ${prefix} 的盘符及 UNC 来源在 realpath 校验前转换`, windowsOnly, (t) => {
+    const f = fixture();
+    t.after(() => {
+      for (const target of [path.dirname(f.data), f.cwd]) fs.rmSync(target, { recursive: true, force: true });
+    });
+    f.write([message("user", "目标：UNC 路径。")]);
+    const previousConfig = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = f.config;
+    t.after(() => { if (previousConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previousConfig; });
+    assert.equal(resolveTranscript(f.cwd, prefix + f.source), f.source);
+    const outside = path.join(f.config, "outside.jsonl");
+    const wrong = path.join(f.projects, "wrong.txt");
+    const directory = path.join(f.projects, "directory.jsonl");
+    fs.copyFileSync(f.source, outside);
+    fs.copyFileSync(f.source, wrong);
+    fs.mkdirSync(directory);
+    for (const target of [outside, wrong, directory]) {
+      let originalError;
+      try { resolveTranscript(f.cwd, target); } catch (error) { originalError = error; }
+      assert.ok(originalError);
+      assert.throws(() => resolveTranscript(f.cwd, prefix + target), { message: originalError.message });
+    }
+    const realpath = fs.realpathSync;
+    let requested;
+    // 不访问网络共享；仅核对进入既有 realpath 校验的 UNC 路径。
+    t.mock.method(fs, "realpathSync", (target, ...args) => {
+      if (typeof target === "string" && target.includes("server\\share")) {
+        requested = target;
+        return f.source;
+      }
+      return realpath(target, ...args);
+    });
+    assert.equal(resolveTranscript(f.cwd, prefix + "UNC\\server\\share\\session.jsonl"), f.source);
+    assert.equal(requested, "\\\\server\\share\\session.jsonl");
+  });
+}
+
+test("Claude 拒绝单反斜杠 Windows 前缀来源", windowsOnly, (t) => {
+  const f = fixture();
+  t.after(() => {
+    for (const target of [path.dirname(f.data), f.cwd]) fs.rmSync(target, { recursive: true, force: true });
+  });
+  f.write([message("user", "目标：拒绝无效前缀。")]);
+  const result = f.transfer(["--source", "\\?\\" + f.source]);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /只接受 Claude 项目目录下已存在的普通 \.jsonl 会话记录；不允许链接逃逸。/);
+  assert.equal(result.stdout, "");
+  assert.equal(fs.existsSync(f.record), false);
+});
 
 test("转交只接受 Claude 项目目录下的普通 .jsonl，拒绝缺失路径、伪前缀和链接逃逸", () => {
   const f = fixture();

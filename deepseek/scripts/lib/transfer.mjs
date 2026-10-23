@@ -6,6 +6,10 @@ import { transcriptRecords } from "./transcript-records.mjs";
 
 export function resolveTranscript(cwd, source = process.env.CLAUDE_TRANSCRIPT_PATH) {
   if (typeof source !== "string" || !source.trim()) throw new Error("未登记 Claude 会话记录，请指定 --source <.jsonl 路径>。");
+  if (process.platform === "win32") {
+    source = source.replace(/^\\\\\?\\UNC\\/i, "\\\\")
+      .replace(/^\\\\\?\\(?=[a-z]:\\)/i, "");
+  }
   const requested = path.resolve(cwd, source);
   if (path.extname(requested).toLowerCase() !== ".jsonl") throw new Error("Claude 会话记录必须是 .jsonl 文件。");
   const projectsPath = path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "projects");

@@ -43,6 +43,10 @@ export function resolveCodexTranscript(cwd, source, context) {
     if (ownerWorkspaceRoot !== undefined && !samePath(projectRoot(ownerWorkspaceRoot), workspaceRoot)) throw new Error();
   } catch { throw new Error("Codex 记录来源的登记项目与当前项目不符或无法核实。"); }
   try {
+    if (process.platform === "win32") {
+      source = source.replace(/^\\\\\?\\UNC\\/i, "\\\\")
+        .replace(/^\\\\\?\\(?=[a-z]:\\)/i, "");
+    }
     const requested = path.resolve(cwd, source);
     const sessions = fs.realpathSync(path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions"));
     const real = fs.realpathSync(requested);
